@@ -47,17 +47,22 @@ Deploy strategy in a simulated trading environment.
 ---
 
 ## 📈 Results & Performance Metrics
-- 1️⃣ Market Regimes for S&P 500 ETF  
-- 2️⃣ Regime Distribution - SP500  
-- 3️⃣ Daily Returns for SP500  
+- 1️⃣ **Market Regimes for S&P 500 ETF**
+  ![Market Regimes for S&P 500 ETF](https://github.com/Poulami-Nandi/RegimeDetectionHMM/blob/main/images/results/sample/market_regime_sp500.png)  
+- 2️⃣ **Regime Distribution - SP500**
+  ![Regime Distribution - SP500 ETF](https://github.com/Poulami-Nandi/RegimeDetectionHMM/blob/main/images/results/sample/dist_market_regime_sp500.png)
+- 3️⃣ **Daily Returns for SP500**
+  ![Daily Returns for SP500 ETF](https://github.com/Poulami-Nandi/RegimeDetectionHMM/blob/main/images/results/sample/dist_returns_sp500.png)  
 - 4️⃣ Cumulative Returns Comparison  
 SP500
-
+  ![Cumulative Returns for SP500 ETF](https://github.com/Poulami-Nandi/RegimeDetectionHMM/blob/main/images/results/sample/cumulative_return_sp500.png)  
 QTUM
-
+  ![Cumulative Returns for QTUM ETF](https://github.com/Poulami-Nandi/RegimeDetectionHMM/blob/main/images/results/sample/cumulative_return_qtum.png)  
 ROBO
+  ![Cumulative Returns for ROBO ETF](https://github.com/Poulami-Nandi/RegimeDetectionHMM/blob/main/images/results/sample/cumulative_return_robo.png)  
 
-- 5️⃣ Market Regime for QTUM  
+- 5️⃣ **Market Regime for QTUM**  
+  ![Market Regime for QTUM ETF](https://github.com/Poulami-Nandi/RegimeDetectionHMM/blob/main/images/results/sample/market_regime_qtum.png)  
 
 ---
 ## 📊 Pending Tasks
