@@ -2,8 +2,9 @@
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import yfinance as yf  # <— added
 
-from src.regime_detection import detect_regimes  # uses yfinance internally
+from src.regime_detection import detect_regimes  # unchanged
 
 st.set_page_config(
     page_title="TSLA Regime Detection — HMM + Rules",
@@ -12,6 +13,21 @@ st.set_page_config(
 )
 
 # ------------------------ Utilities ------------------------
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_tsla_full_history() -> pd.DataFrame:
+    """
+    Fetch TSLA full price history from IPO (2010-06-29) to today.
+    This is ONLY used for the two price/EMA charts so they never shrink to 3y.
+    """
+    start = "2010-06-29"  # TSLA IPO
+    # pad one day on end so today's partial bar appears if available
+    end = (pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    df = yf.download("TSLA", start=start, end=end, auto_adjust=True, progress=False)
+    if df.empty:
+        # ultra-defensive fallback: try period API
+        df = yf.download("TSLA", period="max", auto_adjust=True, progress=False)
+    return df[["Close"]].dropna()
+
 def add_emas(df: pd.DataFrame, fast=20, slow=100) -> pd.DataFrame:
     out = df.copy()
     out["EMA20"] = out["Close"].ewm(span=fast, adjust=False).mean()
@@ -46,7 +62,6 @@ def plot_close_emas(df: pd.DataFrame, title: str, h=440) -> go.Figure:
 
 def add_bear_shading(fig: go.Figure, df_full: pd.DataFrame, df_view: pd.DataFrame,
                      col: str, opacity: float):
-    # Shade using df_full masks, aligned to df_view index
     mask = df_full[col].reindex(df_view.index).fillna(False).astype(bool)
     in_blk, start = False, None
     for i, (d, v) in enumerate(mask.items()):
@@ -65,9 +80,9 @@ def download_png(fig: go.Figure, label: str, filename: str):
         st.download_button(label, png, file_name=filename, mime="image/png")
     except Exception:
         with st.expander("PNG download (host missing *kaleido*)"):
-            st.info("PNG export needs `kaleido`. If unavailable, use the camera icon in the chart toolbar.")
+            st.info("PNG export needs `kaleido`. If unavailable on the host, use the camera icon in the chart toolbar.")
 
-# ------------------------ Sidebar knobs (unchanged) ------------------------
+# ------------------------ Sidebar (your knobs kept) ------------------------
 st.sidebar.header("Controls")
 zoom_years = st.sidebar.slider("Zoom window (years)", 1, 10, 3, 1)
 
@@ -100,9 +115,8 @@ bear_profit_exit  = st.sidebar.number_input("Bear profit exit (bounce % from ent
 # ------------------------ Header ------------------------
 st.title("TSLA Regime Detection — HMM + Human-Readable Rules (Crisp Zoom Charts)")
 
-# ------------------------ One pipeline call ------------------------
+# ------------------------ Fetch once for regimes (pipeline) --------
 with st.spinner("Loading TSLA & computing regimes…"):
-    # 🔒 Fixed ticker; same knobs you already expose
     df_reg, _ = detect_regimes(
         ticker="TSLA",
         n_components=n_components,
@@ -124,18 +138,19 @@ with st.spinner("Loading TSLA & computing regimes…"):
         trend_gate=trend_gate,
         trend_exit_cross=trend_exit_cross,
         bear_profit_exit=bear_profit_exit,
-        start="2000-01-01",
+        start="2010-06-29",  # IPO
         end="today",
     )
 
-# Same source for everything below (prevents “blank” charts if Yahoo throttles a second fetch)
-px_full = add_emas(df_reg[["Close"]])
+# ------------------------ Full-history price for the two EMA charts
+px_full_price = fetch_tsla_full_history()               # <— FULL series (independent of pipeline)
+px_full = add_emas(px_full_price)
 px_zoom = last_years(px_full, zoom_years)
 
 full_years = (px_full.index.max() - px_full.index.min()).days / 365.25
 st.caption(
-    f"Full-history price with EMAs (IPO→today) and last-{zoom_years}-years regime view. "
-    f"Data via the pipeline (single fetch).  "
+    f"Full-history price with EMAs (IPO→today) and last-{zoom_years}-years view. "
+    f"Price source for charts = direct Yahoo full history; regimes computed by pipeline. "
     f"Diagnostic — full-history span: {full_years:,.1f}y; zoom window: {zoom_years}y."
 )
 
@@ -151,7 +166,6 @@ download_png(fig2, "Download zoom chart (high-res)", "tsla_last_years.png")
 
 # ------------------------ Regimes (last N years only) --------------
 fig3 = plot_close_emas(px_zoom, f"TSLA — Regimes (last {zoom_years} years; light=candidate, dark=confirmed)", h=480)
-# light = candidate, dark = confirmed
 if "bear_candidate" in df_reg.columns:
     add_bear_shading(fig3, df_reg, px_zoom, "bear_candidate", opacity=0.12)
 if "bear_confirm" in df_reg.columns:
