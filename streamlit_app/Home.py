@@ -419,3 +419,74 @@ def render_parameter_explainer():
 
 render_parameter_explainer()
 st.caption("Author: Dr. Poulami Nandi · Research demo only. Not investment advice.")
+
+# Check 1: mask share on the *actual plotted* index
+def _share_true(s): 
+    s = s.astype(bool)
+    return float(s.sum())/len(s) if len(s) else 0.0
+
+cand_share = _share_true(reg_zoom.get("bear_candidate", pd.Series(index=reg_zoom.index, dtype=bool)))
+conf_share = _share_true(reg_zoom.get("bear_confirm",  pd.Series(index=reg_zoom.index, dtype=bool)))
+st.info(f"[Diag] Last {zoom_years}y bear shares — candidate={cand_share:.1%}, confirmed={conf_share:.1%}")
+
+# Check 2: run-lengths (are we getting a single giant run?)
+runs_txt = []
+for col in ["bear_candidate","bear_confirm"]:
+    if col in reg_zoom:
+        s = reg_zoom[col].astype(bool)
+        rid = (s != s.shift()).cumsum()
+        lens = s.groupby(rid).sum().astype(int)
+        lens = lens[lens > 0]
+        if len(lens):
+            runs_txt.append(f"{col}: runs={len(lens)}, max_run={int(lens.max())} days")
+        else:
+            runs_txt.append(f"{col}: no True runs")
+st.caption(" | ".join(runs_txt))
+
+# ---- DEBUG BUNDLE (download as zip) -----------------------------------------
+import io, zipfile, json, platform, sys
+import pandas as pd
+
+def _csv_bytes(df: pd.DataFrame) -> bytes:
+    out = io.StringIO()
+    df.to_csv(out)
+    return out.getvalue().encode("utf-8")
+
+# Sanity: align last-3y regime table to the zoom chart index (no fills to True)
+reg_zoom_idx = px_zoom.index  # the index you actually plotted
+reg_zoom = df_reg.reindex(reg_zoom_idx).copy()
+
+# Minimal environment snapshot
+env_txt = "\n".join([
+    f"python={sys.version.split()[0]}",
+    f"platform={platform.platform()}",
+    f"numpy={__import__('numpy').__version__}",
+    f"pandas={pd.__version__}",
+    f"sklearn={__import__('sklearn').__version__}",
+    f"hmmlearn={__import__('hmmlearn').__version__}",
+    f"plotly={__import__('plotly').__version__}",
+    f"streamlit={__import__('streamlit').__version__}",
+])
+
+# Make the zip in-memory
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+    z.writestr("raw_yf.csv",        _csv_bytes(df_raw))
+    z.writestr("features.csv",      _csv_bytes(df_feat))
+    z.writestr("posteriors.csv",    _csv_bytes(post_df))
+    z.writestr("regimes_zoom.csv",  _csv_bytes(reg_zoom))
+    if "segments_last3y" in locals():
+        z.writestr("segments_last3y.csv", _csv_bytes(segments_last3y))
+    z.writestr("thresholds.json",   json.dumps(thresholds_used, indent=2))
+    z.writestr("env.txt",           env_txt)
+
+st.download_button(
+    "⬇️ Download TSLA debug bundle (.zip)",
+    data=buf.getvalue(),
+    file_name="TSLA_debug_bundle.zip",
+    mime="application/zip",
+    help="Contains raw Yahoo data, features, HMM posteriors, last-3y regime masks, "
+         "segments, thresholds and environment info."
+)
+# -----------------------------------------------------------------------------
+
