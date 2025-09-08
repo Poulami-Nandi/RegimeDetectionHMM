@@ -1,0 +1,7 @@
+ticker,type,segments,wrong_segments,wrong_segments_%,days,wrong_days,wrong_days_%
+TSLA,bear_confirmed,3,1,33.33,194,49,25.26
+TSLA,bear_candidate,5,3,60.0,565,342,60.53
+AAPL,bear_confirmed,0,0,0.0,0,0,0.0
+AAPL,bear_candidate,1,1,100.0,20,20,100.0
+NVDA,bear_confirmed,1,1,100.0,47,47,100.0
+NVDA,bear_candidate,3,3,100.0,185,185,100.0

@@ -1,0 +1,5 @@
+type,start_date,start_price,end_date,end_price,n_days,return_pct,direction_ok
+bear_candidate,2025-04-14,202.025497,2025-05-12,210.551041,20,0.0422,False
+bull_candidate,2022-09-06,152.128571,2025-04-04,187.920029,648,0.235271,True
+bull_candidate,2025-05-20,206.625504,2025-09-05,239.690002,75,0.160021,True
+bull_confirmed,2022-09-06,152.128571,2025-09-05,239.690002,753,0.575575,True
