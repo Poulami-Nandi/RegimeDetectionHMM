@@ -3,6 +3,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
+import io
+import sys
+import importlib
+import subprocess
 
 from src.regime_detection import detect_regimes  # your pipeline
 
@@ -96,14 +100,57 @@ def add_bear_shading(fig: go.Figure, df_full: pd.DataFrame, df_view: pd.DataFram
                           opacity=opacity, layer="below", line_width=0)
             in_blk = False
 
-def download_png(fig: go.Figure, label: str, filename: str):
-    # High-res export with graceful fallback if kaleido is unavailable on the host
+def ensure_kaleido() -> bool:
+    """
+    Try to import kaleido. If missing and the platform allows, attempt a single
+    runtime install. Return True if available, False otherwise.
+    """
     try:
-        png = fig.to_image(format="png", scale=6, width=2200, height=900)
-        st.download_button(label, png, file_name=filename, mime="image/png")
+        importlib.import_module("kaleido")
+        return True
     except Exception:
-        with st.expander("PNG download (host missing *kaleido*)"):
-            st.info("PNG export needs `kaleido`. If unavailable, use the camera icon in the chart toolbar to save a PNG.")
+        pass
+
+    # Avoid repeated attempts in the same session
+    if st.session_state.get("_kaleido_attempted", False):
+        return False
+
+    st.session_state["_kaleido_attempted"] = True
+
+    # Some managed hosts allow runtime pip; if it fails we just fall back gracefully
+    try:
+        with st.spinner("Installing 'kaleido' once for PNG export…"):
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "kaleido==0.2.1"])
+        importlib.import_module("kaleido")
+        return True
+    except Exception:
+        return False
+
+
+def download_png(fig, label: str, filename: str, *, width: int = 2200, height: int = 900, scale: int = 6):
+    """
+    High-res PNG export using Kaleido if available. If not, show a clean fallback
+    message to use the Plotly camera icon.
+    """
+    try:
+        if ensure_kaleido():
+            png_bytes = fig.to_image(format="png", width=width, height=height, scale=scale, engine="kaleido")
+            st.download_button(label, png_bytes, file_name=filename, mime="image/png", use_container_width=True)
+        else:
+            with st.expander("PNG download (Kaleido not available)"):
+                st.info(
+                    "PNG export needs the 'kaleido' renderer. "
+                    "On this host it isn’t available right now. "
+                    "Use the camera icon in the chart toolbar to save a PNG, "
+                    "or deploy with `runtime.txt` = `3.11` and `kaleido==0.2.1` in `requirements.txt`."
+                )
+    except Exception as e:
+        with st.expander("PNG download (renderer error)"):
+            st.warning(
+                f"Couldn’t render PNG with Kaleido.\n\n"
+                f"Details: {e}\n\n"
+                "Use the camera icon in the chart toolbar to save a PNG for now."
+            )
 
 # ===================== UI =====================
 
