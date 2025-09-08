@@ -2,6 +2,7 @@
 # streamlit_app/Home.py
 from __future__ import annotations
 import inspect
+from functools import wraps
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -372,6 +373,55 @@ def _call_detect_regimes_flexible(func, **vals):
         return res[0], None
     return res, None
 
+
+# after: from src.regime_detection import detect_regimes
+
+# --- make detect_regimes tolerant to different parameter names ---
+_ALIAS_MAP = {
+    "bear_enter":         ["prob_threshold", "enter_prob", "enter_threshold"],
+    "bear_exit":          ["prob_exit", "exit_prob", "exit_threshold"],
+    "k_forward":          ["k_fwd", "k"],
+    "ema_span":           ["ema", "ema_smooth"],
+    "min_bear_run":       ["min_run"],
+    "ddown_threshold":    ["dd_thr", "drawdown_threshold"],
+    "confirm_days":       ["confirm_bear", "confirm"],
+    "bull_mom_threshold": ["bull_mom_thr"],
+    "bull_ddown_exit":    ["bull_dd_exit", "bull_ddown_thr"],
+    "confirm_days_bull":  ["confirm_bull"],
+    "entry_ret_lookback": ["lbk", "lookback"],
+    "entry_ret_thresh":   ["entry_ret_thr"],
+    "entry_ddown_thresh": ["entry_dd_thr"],
+    "bear_profit_exit":   ["profit_exit"],
+}
+
+def _wrap_detect_regimes(func):
+    sig_names = set(inspect.signature(func).parameters.keys())
+
+    def _map_kwargs(kwargs):
+        out = {}
+        for k, v in kwargs.items():
+            if v is None:
+                continue
+            if k in sig_names:
+                out[k] = v
+            else:
+                for alt in _ALIAS_MAP.get(k, ()):
+                    if alt in sig_names:
+                        out[alt] = v
+                        break
+        return out
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Most calls are kwargs-only in this app; still allow args passthrough
+        if args:
+            return func(*args, **kwargs)
+        return func(**_map_kwargs(kwargs))
+
+    return wrapper
+
+# Monkey-patch: from here on, ANY direct call gets filtered/aliased safely.
+detect_regimes = _wrap_detect_regimes(detect_regimes)
 
 df, model = _call_detect_regimes_flexible(
     detect_regimes,
