@@ -1,0 +1,11 @@
+[server]
+headless = true
+
+[client]
+showErrorDetails = "full"
+
+[theme]
+base = "light"
+
+[ui]
+hideTopBar = false
