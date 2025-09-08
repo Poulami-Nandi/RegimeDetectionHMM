@@ -1,6 +1,7 @@
 # streamlit_app/Home.py
 # streamlit_app/Home.py
 from __future__ import annotations
+import inspect
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -316,7 +317,6 @@ download_png(fig2, "Download zoom chart (high-res)", "tsla_last_years.png")
 # ===================== Regime plot (runs after price charts) =====================
 
 # ======================= RUN PIPELINE (TSLA only) =======================
-from src.regime_detection import detect_regimes  # your pipeline
 def _call_detect_regimes_flexible(func, **vals):
     """
     Map our concept values to whatever parameter names `detect_regimes` supports.
