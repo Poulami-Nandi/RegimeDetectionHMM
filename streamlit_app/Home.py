@@ -85,6 +85,41 @@ def last_years(df: pd.DataFrame, years: int) -> pd.DataFrame:
     start = end - pd.DateOffset(years=years)
     return df.loc[df.index >= start].copy()
 
+def add_bear_shading(fig, df_reg, index_like, col, opacity=0.12, color="crimson", min_bars=3):
+    """
+    Shade contiguous True runs in df_reg[col] using the x-index of `index_like`
+    (a DataFrame of plotted prices or a DatetimeIndex).
+
+    - No forward/backward fill of booleans (prevents 'smearing').
+    - Only shades runs with length >= min_bars (filters 1–2 bar blips).
+    """
+    import pandas as pd
+
+    # Resolve target index we are plotting on (the zoom window)
+    idx = index_like.index if hasattr(index_like, "index") else index_like
+
+    # Pull series & align strictly to the plotted index (no fills to True)
+    if col not in df_reg.columns:
+        return fig
+    ser = df_reg[col].astype(bool)
+    ser = ser.reindex(idx, fill_value=False)  # anything missing -> False
+
+    # Find contiguous True runs
+    run_id = (ser != ser.shift()).cumsum()
+    for _, mask in ser.groupby(run_id):
+        if not mask.iloc[0]:
+            continue  # this run is False
+        if len(mask) < min_bars:
+            continue  # ignore tiny runs
+        x0, x1 = mask.index[0], mask.index[-1]
+        fig.add_vrect(
+            x0=x0, x1=x1,
+            fillcolor=color, opacity=opacity,
+            line_width=0, layer="below"
+        )
+    return fig
+
+
 def plot_close_emas(df: pd.DataFrame, title: str, h=440) -> go.Figure:
     fig = go.Figure()
     if not df.empty:
@@ -279,11 +314,10 @@ with st.spinner("Computing regimes (HMM + rules)…"):
 
 # Regime chart = last N years only
 fig3 = plot_close_emas(px_zoom, f"TSLA — Regimes (last {zoom_years} years; light=candidate, dark=confirmed)", h=480)
-
-# NEW shading: show candidate-only as (candidate AND NOT confirmed), then confirmed on top
+# NEW shading: candidate-only (candidate AND NOT confirmed), then confirmed on top
 if {"bear_candidate", "bear_confirm"}.issubset(df_reg.columns):
     cand_only = df_reg["bear_candidate"].astype(bool) & (~df_reg["bear_confirm"].astype(bool))
-    # (optional) align to px_zoom index in case of any index differences
+    # align strictly to the zoom index
     cand_only = cand_only.reindex(px_zoom.index, fill_value=False)
 
     df_tmp = df_reg.reindex(px_zoom.index).copy()
@@ -292,11 +326,10 @@ if {"bear_candidate", "bear_confirm"}.issubset(df_reg.columns):
     add_bear_shading(fig3, df_tmp, px_zoom, "_cand_only", opacity=0.12)  # light red
     add_bear_shading(fig3, df_reg, px_zoom, "bear_confirm", opacity=0.30)  # dark red
 else:
-    # fallback if only one column exists
     if "bear_candidate" in df_reg.columns:
-        add_bear_shading(fig3, df_reg, px_zoom, "bear_candidate", 0.12)
+        add_bear_shading(fig3, df_reg, px_zoom, "bear_candidate", opacity=0.12)
     if "bear_confirm" in df_reg.columns:
-        add_bear_shading(fig3, df_reg, px_zoom, "bear_confirm", 0.30)
+        add_bear_shading(fig3, df_reg, px_zoom, "bear_confirm", opacity=0.30)
 
 st.plotly_chart(fig3, use_container_width=True, theme="streamlit")
 download_png(fig3, "Download regimes chart (high-res)", "tsla_regimes_last_years.png")
