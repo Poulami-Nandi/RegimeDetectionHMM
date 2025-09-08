@@ -6,13 +6,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
-# Must be first for Streamlit
 st.set_page_config(page_title="TSLA Regime Detection", layout="wide")
-
 st.title("TSLA Regime Detection — HMM + Human-Readable Rules")
-st.caption("Price, EMAs, regimes since IPO — plus a zoomed last-3-years view. Data via Yahoo Finance at runtime.")
+st.caption("Full-history price with EMAs (from IPO) + last-N-years regime view. Data via Yahoo Finance at runtime.")
 
-# Try to import your pipeline
+# -------- Import your pipeline --------
 try:
     from src.regime_detection import detect_regimes
     PIPELINE_IMPORT_ERROR = None
@@ -20,118 +18,44 @@ except Exception as e:
     detect_regimes = None
     PIPELINE_IMPORT_ERROR = e
 
-# ---------------- Sidebar controls ----------------
+# -------- Sidebar controls --------
 st.sidebar.header("Configuration")
 
 with st.sidebar.expander("General", expanded=True):
-    n_components = st.number_input(
-        "Number of HMM states (n_components)", 2, 6, 4, 1,
-        help="How many market 'moods' to learn. TSLA often works with 3–4. (HMM = Hidden Markov Model)"
-    )
-    ema_span = st.slider(
-        "Smoothing span for bear probability (ema_span)", 5, 60, 20, 1,
-        help="EMA over daily bear probabilities; bigger = smoother signal (fewer flips). (EMA = Exponential Moving Average)"
-    )
-    k_forward = st.slider(
-        "Horizon to judge state behavior (k_forward)", 1, 30, 10, 1,
-        help="Used only to NAME states bear/bull from near-future behavior; not for trading."
-    )
+    n_components = st.number_input("HMM states (n_components)", 2, 6, 4, 1)
+    ema_span = st.slider("Smoothing span for bear probability (ema_span)", 5, 60, 20, 1)
+    k_forward = st.slider("Horizon to judge state behavior (k_forward)", 1, 30, 10, 1)
 
 with st.sidebar.expander("Hysteresis thresholds", expanded=True):
-    bear_enter = st.slider(
-        "Enter bear when smoothed prob ≥ (bear_enter)", 0.50, 0.99, 0.80, 0.01,
-        help="Raise to see fewer candidate bears. 'Smoothed prob' is an EMA of the daily bear probability."
-    )
-    bear_exit = st.slider(
-        "Exit bear when smoothed prob ≤ (bear_exit)", 0.10, 0.90, 0.55, 0.01,
-        help="Higher exit exits earlier; keep a gap vs enter to avoid flip-flops."
-    )
+    bear_enter = st.slider("Enter bear when smoothed prob ≥ (bear_enter)", 0.50, 0.99, 0.80, 0.01)
+    bear_exit  = st.slider("Exit bear when smoothed prob ≤ (bear_exit)", 0.10, 0.90, 0.55, 0.01)
 
 with st.sidebar.expander("Bear confirmations (downside checks)", expanded=True):
-    mom_threshold = st.slider(
-        "Momentum threshold (fast under slow by ~X of price)", 0.0, 0.10, 0.03, 0.001,
-        help="≈3% means EMA20 sits ~3% under EMA100 for some days. (Momentum here = distance between EMAs as % of price.)"
-    )
-    ddown_threshold = st.slider(
-        "Drawdown threshold from recent peak", 0.0, 0.50, 0.15, 0.01,
-        help="Require price to be this far below the recent high to confirm bear. (Drawdown = drop from recent high.)"
-    )
-    confirm_days = st.slider(
-        "Confirm days (bear)", 1, 20, 7, 1,
-        help="Consecutive days momentum/drawdown must hold before promoting candidate→confirmed."
-    )
+    mom_threshold = st.slider("Momentum threshold (EMA20 under EMA100 by ~X of price)", 0.0, 0.10, 0.03, 0.001)
+    ddown_threshold = st.slider("Drawdown threshold from recent peak", 0.0, 0.50, 0.15, 0.01)
+    confirm_days = st.slider("Confirm days (bear)", 1, 20, 7, 1)
 
 with st.sidebar.expander("Bull confirms & early exits", expanded=False):
-    bull_mom_threshold = st.slider(
-        "Bull momentum threshold (fast over slow by ~X of price)", 0.0, 0.10, 0.01, 0.001,
-        help="Helps exit bear when tide turns (EMA20 rises above EMA100 by ~X)."
-    )
-    bull_ddown_exit = st.slider(
-        "Bull drawdown exit (distance from peak shrinks to)", 0.0, 0.20, 0.06, 0.01,
-        help="Exit bear if drawdown recovers toward the prior peak (e.g., within 6%)."
-    )
-    confirm_days_bull = st.slider(
-        "Confirm days (bull)", 1, 10, 3, 1,
-        help="Consecutive days bull confirms must hold to exit bear."
-    )
-    bear_profit_exit = st.slider(
-        "Bounce/Profit exit from bear (+X from bear entry)", 0.0, 0.20, 0.05, 0.005,
-        help="If TSLA rallies +X since bear entry, exit quickly even if probability lags."
-    )
+    bull_mom_threshold = st.slider("Bull momentum threshold (EMA20 over EMA100 by ~X)", 0.0, 0.10, 0.01, 0.001)
+    bull_ddown_exit = st.slider("Bull drawdown exit (distance from peak shrinks to)", 0.0, 0.20, 0.06, 0.01)
+    confirm_days_bull = st.slider("Confirm days (bull)", 1, 10, 3, 1)
+    bear_profit_exit = st.slider("Bounce/Profit exit from bear (+X from bear entry)", 0.0, 0.20, 0.05, 0.005)
 
 with st.sidebar.expander("Gates & run-cleanup", expanded=False):
-    direction_gate = st.checkbox(
-        "Require recent weakness at entry (direction_gate)", True,
-        help="Enter bear only if last L days lost at least entry_ret_thresh AND drawdown ≤ entry_dd_thresh."
-    )
-    entry_ret_lookback = st.slider(
-        "Lookback L for entry direction (days)", 5, 30, 10, 1,
-        help="Used when direction_gate is on."
-    )
-    entry_ret_thresh = st.slider(
-        "Cumulative return over L days must be ≤", -0.10, 0.05, -0.01, 0.001,
-        help="Example −0.01 ≈ −1% over last L days."
-    )
-    entry_dd_thresh = st.slider(
-        "Current drawdown must be ≤", -0.30, 0.00, -0.03, 0.005,
-        help="Example −0.03 ≈ 3% below recent peak."
-    )
-
-    trend_gate = st.checkbox(
-        "Require under-trend at bear entry (trend_gate)", False,
-        help="Price or EMA20 must be under EMA100 at entry."
-    )
-    trend_exit_cross = st.checkbox(
-        "Exit bear on trend cross up", True,
-        help="Exit bear when price/EMA20 crosses back above EMA100."
-    )
-
-    min_bear_run = st.slider(
-        "Min confirmed-bear run length (days)", 1, 40, 15, 1,
-        help="Delete tiny islands shorter than this; cleaner plot."
-    )
-    min_bull_run = st.slider(
-        "Min bull run length (days)", 1, 20, 5, 1,
-        help="Delete tiny bull islands."
-    )
+    direction_gate = st.checkbox("Require recent weakness at entry (direction_gate)", True)
+    entry_ret_lookback = st.slider("Lookback L for entry direction (days)", 5, 30, 10, 1)
+    entry_ret_thresh = st.slider("Cumulative return over L days must be ≤", -0.10, 0.05, -0.01, 0.001)
+    entry_dd_thresh = st.slider("Current drawdown must be ≤", -0.30, 0.00, -0.03, 0.005)
+    trend_gate = st.checkbox("Require under-trend at bear entry (trend_gate)", False)
+    trend_exit_cross = st.checkbox("Exit bear on trend cross up", True)
+    min_bear_run = st.slider("Min confirmed-bear run length (days)", 1, 40, 15, 1)
+    min_bull_run = st.slider("Min bull run length (days)", 1, 20, 5, 1)
 
 with st.sidebar.expander("Auto thresholds (optional, adaptive)", expanded=False):
-    auto_thresholds = st.checkbox(
-        "Auto-pick bear_enter/bear_exit from recent history", False,
-        help="Good for stocks whose behavior shifts (AAPL/NVDA); TSLA can stay manual."
-    )
-    bear_target = st.slider(
-        "Target bear share (recent window)", 0.05, 0.60, 0.32, 0.01,
-        help="Used only if auto_thresholds is on."
-    )
-    auto_window_years = st.slider(
-        "Auto window (years)", 2, 10, 5, 1,
-        help="Recent window to learn thresholds from."
-    )
-    min_gap = st.slider(
-        "Min gap between enter and exit", 0.02, 0.40, 0.10, 0.01,
-        help="Prevents enter≈exit which causes flip-flops."
-    )
+    auto_thresholds = st.checkbox("Auto-pick bear_enter/bear_exit from recent history", False)
+    bear_target = st.slider("Target bear share (recent window)", 0.05, 0.60, 0.32, 0.01)
+    auto_window_years = st.slider("Auto window (years)", 2, 10, 5, 1)
+    min_gap = st.slider("Min gap between enter and exit", 0.02, 0.40, 0.10, 0.01)
 
 with st.sidebar.expander("Figure settings", expanded=False):
     fig_w = st.slider("Figure width", 8, 20, 16, 1)
@@ -140,32 +64,24 @@ with st.sidebar.expander("Figure settings", expanded=False):
     zoom_years = st.slider("Zoom window (last N years)", 1, 5, 3, 1)
 
 st.sidebar.info(
-    "ℹ️ **How to read the labels**\n\n"
-    "- **Light red** = candidate bear (probability crossed ENTER).\n"
-    "- **Dark red** = confirmed bear (weak trend and/or real drawdown persisted).\n"
-    "- Exit bear on bounce, trend cross, or when probability slips below EXIT."
+    "ℹ️ Light red = candidate bear (probability crossed ENTER). Dark red = confirmed bear (weak trend/drawdown persisted)."
 )
 
-# ---------------- Guardrails ----------------
+# -------- Guardrail on import failure --------
 if detect_regimes is None:
     st.error(
         "Couldn't import pipeline: `from src.regime_detection import detect_regimes` failed.\n\n"
-        f"Error: {PIPELINE_IMPORT_ERROR}\n\n"
-        "Ensure your repo has src/regime_detection.py with detect_regimes()."
+        f"Error: {PIPELINE_IMPORT_ERROR}\n"
+        "Ensure src/regime_detection.py defines detect_regimes()."
     )
     st.stop()
 
-# ---------------- Run pipeline for TSLA ----------------
 ticker = "TSLA"
 
 def call_detect_regimes_safely():
-    """Pass only the kwargs your detect_regimes() supports.
-       Map common synonyms and fallback to a minimal call if needed.
-    """
     sig = inspect.signature(detect_regimes)
     params = set(sig.parameters.keys())
 
-    # Preferred kwargs
     pref = dict(
         ticker=ticker,
         n_components=int(n_components),
@@ -191,11 +107,12 @@ def call_detect_regimes_safely():
         bear_target=float(bear_target),
         auto_window_years=int(auto_window_years),
         min_gap=float(min_gap),
-        return_debug=True,   # if supported
-        end="today",         # if supported
+        return_debug=True,     # if supported
+        start="2010-01-01",    # ask for full history explicitly if supported
+        end="today",           # explicit end label
     )
 
-    # Synonyms for older/newer versions
+    # Synonyms for older versions
     if "prob_threshold" in params and "bear_enter" not in params:
         pref["prob_threshold"] = float(bear_enter)
     if "prob_threshold_exit" in params and "bear_exit" not in params:
@@ -204,20 +121,23 @@ def call_detect_regimes_safely():
         pref["min_run"] = int(min_bear_run)
     if "ema_window" in params and "ema_span" not in params:
         pref["ema_window"] = int(ema_span)
+    if "from" in params and "start" not in params:
+        pref["from"] = "2010-01-01"
     if "to" in params and "end" not in params:
         pref["to"] = "today"
+    if "start_date" in params and "start" not in params:
+        pref["start_date"] = "2010-01-01"
     if "end_date" in params and "end" not in params:
         pref["end_date"] = "today"
+    if "full_history" in params:
+        pref["full_history"] = True
 
     filtered = {k: v for k, v in pref.items() if k in params}
 
     try:
         return detect_regimes(**filtered)
     except TypeError as e:
-        st.warning(
-            "Using a minimal parameter set due to a version mismatch in detect_regimes().\n\n"
-            f"Details: {e}"
-        )
+        st.warning("Falling back to a minimal call due to a version mismatch.\n\n" + str(e))
         return detect_regimes(ticker=ticker, n_components=int(n_components))
 
 with st.spinner("Downloading data & computing regimes..."):
@@ -227,60 +147,80 @@ if not isinstance(df, pd.DataFrame) or df.empty:
     st.error("Pipeline returned an empty DataFrame. Try different settings.")
     st.stop()
 
-# Ensure EMAs exist for plotting (fallbacks if your pipeline doesn't add them)
+# Ensure EMAs exist (fallbacks)
 if "sma20" not in df.columns:
     df["sma20"] = df["Close"].ewm(span=20, adjust=False).mean()
 if "sma100" not in df.columns:
     df["sma100"] = df["Close"].ewm(span=100, adjust=False).mean()
 
-# ---------------- Plot helpers ----------------
-def shade_regions(ax, dates, mask, color, alpha, label):
-    """Shade contiguous True regions in mask as spans."""
-    if mask is None or not bool(mask.any()):
-        return
-    in_run = False
-    start = None
-    first = True
-    for i, on in enumerate(mask.values):
-        if on and not in_run:
-            in_run = True
-            start = dates[i]
-        is_last = (i == len(mask.values) - 1)
-        if in_run and (not on or is_last):
-            end = dates[i] if not on else dates[i]
-            ax.axvspan(start, end, color=color, alpha=alpha, label=label if first else None)
-            first = False
-            in_run = False
-            start = None
+# ---------- Build a true full-history series for the FIRST chart ----------
+# Some pipeline versions return only a recent window. If the span is too short,
+# fetch full history via yfinance just for the first (IPO→today) chart.
+def get_full_history_df():
+    try:
+        # If we already have ≥ 8 years, use it; otherwise fetch.
+        if (df.index.max() - df.index.min()) >= pd.DateOffset(years=8):
+            base = df.copy()
+        else:
+            import yfinance as yf
+            raw = yf.download(ticker, start="2010-01-01", auto_adjust=True, progress=False)
+            if raw.empty:
+                base = df.copy()
+            else:
+                raw.rename(columns=str.title, inplace=True)  # Close, Open, etc.
+                base = raw[["Close"]].copy()
+        if "sma20" not in base.columns:
+            base["sma20"] = base["Close"].ewm(span=20, adjust=False).mean()
+        if "sma100" not in base.columns:
+            base["sma100"] = base["Close"].ewm(span=100, adjust=False).mean()
+        return base.dropna()
+    except Exception:
+        return df.copy()
 
-# ---------------- Plot A: Full history Close + EMAs ----------------
-st.subheader("TSLA — Close with EMA20 / EMA100 (full history)")
+df_full = get_full_history_df()
+
+# ---------- Build last-N years slice for the other charts ----------
+cutoff = df.index.max() - pd.DateOffset(years=int(zoom_years))
+dfz = df[df.index >= cutoff].copy()
+
+# ---------- Plot A: Full history Close + EMAs (IPO → today) ----------
+st.subheader("TSLA — Close with EMA20 / EMA100 (IPO → today)")
 fig_full, ax_full = plt.subplots(figsize=(int(fig_w), int(fig_h)), dpi=int(dpi))
-ax_full.plot(df.index, df["Close"], label=f"{ticker} Close", linewidth=1.2)
-ax_full.plot(df.index, df["sma20"], label="EMA20 (fast)", linewidth=1)
-ax_full.plot(df.index, df["sma100"], label="EMA100 (slow)", linewidth=1)
+ax_full.plot(df_full.index, df_full["Close"], label="TSLA Close", linewidth=1.2)
+ax_full.plot(df_full.index, df_full["sma20"], label="EMA20 (fast)", linewidth=1)
+ax_full.plot(df_full.index, df_full["sma100"], label="EMA100 (slow)", linewidth=1)
 ax_full.set_xlabel("Date"); ax_full.set_ylabel("Price (USD)")
 ax_full.legend(loc="upper left"); ax_full.grid(alpha=0.25)
 st.pyplot(fig_full, use_container_width=True)
 
-# ---------------- Build last-N-years slice once ----------------
-cutoff = df.index.max() - pd.DateOffset(years=int(zoom_years))
-dfz = df[df.index >= cutoff].copy()
-
-# ---------------- Plot B: Last N years Close + EMAs ----------------
+# ---------- Plot B: Close + EMAs (last N years only) ----------
 st.subheader(f"TSLA — Close with EMA20 / EMA100 (last {int(zoom_years)} years)")
 fig_last, ax_last = plt.subplots(figsize=(int(fig_w), int(fig_h)), dpi=int(dpi))
-ax_last.plot(dfz.index, dfz["Close"], label=f"{ticker} Close", linewidth=1.2)
+ax_last.plot(dfz.index, dfz["Close"], label="TSLA Close", linewidth=1.2)
 ax_last.plot(dfz.index, dfz["sma20"], label="EMA20 (fast)", linewidth=1)
 ax_last.plot(dfz.index, dfz["sma100"], label="EMA100 (slow)", linewidth=1)
 ax_last.set_xlabel("Date"); ax_last.set_ylabel("Price (USD)")
 ax_last.legend(loc="upper left"); ax_last.grid(alpha=0.25)
 st.pyplot(fig_last, use_container_width=True)
 
-# ---------------- Plot C: Regimes — last N years ONLY ----------------
-st.subheader(f"TSLA — Regimes (last {int(zoom_years)} years; light red = candidate, dark red = confirmed)")
+# ---------- Plot C: Regimes (last N years only) ----------
+def shade_regions(ax, dates, mask, color, alpha, label):
+    if mask is None or not bool(mask.any()):
+        return
+    in_run, start, first = False, None, True
+    vals = mask.values
+    for i, on in enumerate(vals):
+        if on and not in_run:
+            in_run, start = True, dates[i]
+        is_last = (i == len(vals) - 1)
+        if in_run and (not on or is_last):
+            end = dates[i]
+            ax.axvspan(start, end, color=color, alpha=alpha, label=label if first else None)
+            first, in_run, start = False, False, None
+
+st.subheader(f"TSLA — Regimes (last {int(zoom_years)} years; light red=candidate, dark red=confirmed)")
 fig_reg, ax_reg = plt.subplots(figsize=(int(fig_w), int(fig_h)), dpi=int(dpi))
-ax_reg.plot(dfz.index, dfz["Close"], color="black", linewidth=1.0, label=f"{ticker} Close")
+ax_reg.plot(dfz.index, dfz["Close"], color="black", linewidth=1.0, label="TSLA Close")
 ax_reg.plot(dfz.index, dfz["sma20"], color="tab:blue", linewidth=0.8, alpha=0.7, label="EMA20")
 ax_reg.plot(dfz.index, dfz["sma100"], color="tab:orange", linewidth=0.8, alpha=0.7, label="EMA100")
 
@@ -304,13 +244,12 @@ ax_reg.set_xlabel("Date"); ax_reg.set_ylabel("Price (USD)")
 ax_reg.legend(loc="upper left"); ax_reg.grid(alpha=0.25)
 st.pyplot(fig_reg, use_container_width=True)
 
-# ---------------- Explainer ----------------
+# ---------- Explainer ----------
 st.markdown("---")
 st.markdown("## Parameter explainer")
-
 st.markdown(
     """
-**Acronyms used**
+**Acronyms**
 - **HMM:** Hidden Markov Model (unsupervised model that assigns a hidden “state” to each day).
 - **EMA:** Exponential Moving Average (recent prices weighted more than older prices).
 
@@ -322,51 +261,35 @@ st.markdown(
 - **k_forward** — only for *naming* states (we look a few days ahead to decide if a state behaves like bull or bear).
 
 **Hysteresis thresholds**
-- **bear_enter** — create a **bear candidate** when smoothed bear probability rises above this.  
-  *TSLA example:* 0.80 keeps candidates rare and meaningful.
-- **bear_exit** — exit bear when it falls below this lower level.  
-  *Why two levels?* Prevents “flip-flops” around a single threshold.
+- **bear_enter** — create a **bear candidate** when smoothed bear probability rises above this (e.g., 0.80).  
+- **bear_exit** — exit bear when the smoothed probability falls below this (e.g., 0.55).  
+  Two different levels prevent flip-flops.
 
 **Bear confirmations (turn candidate → confirmed)**
-- **mom_threshold** — how far **EMA20 is below EMA100**, roughly as a % of price.  
-  *TSLA example:* 0.03 ≈ 3% under; if that persists for several days, trend is truly weak.
-- **ddown_threshold** — how far price sits **below the recent high** (drawdown).  
-  *TSLA example:* 0.15 ≈ 15% below peak = real pressure.  
-- **confirm_days** — how many **consecutive** days the momentum/drawdown tests must be true.
+- **mom_threshold** — EMA20 under EMA100 by ~X of price (trend weakness).  
+- **ddown_threshold** — price ~X below recent peak (drawdown).  
+- **confirm_days** — how many consecutive days those must hold.
 
 **Bull confirms & early exits (to end bear)**
-- **bull_mom_threshold** — how far **EMA20 is above EMA100** to accept bull strength.  
-- **bull_ddown_exit** — drawdown shrinks toward the peak (e.g., within 6%).  
-- **confirm_days_bull** — days those bull tests must hold.  
-- **bear_profit_exit** — if price rallies **+X%** from the **bear entry**, exit early.  
-  *TSLA example:* +5% bounce after entry can invalidate a weak bear quickly.
+- **bull_mom_threshold** — EMA20 above EMA100 by ~X.  
+- **bull_ddown_exit** — drawdown recovered toward peak (e.g., within 6%).  
+- **confirm_days_bull** — consecutive days those must hold.  
+- **bear_profit_exit** — if price rallies +X% from bear entry, exit quickly even if probability lags.
 
-**Gates & run cleanup**
-- **direction_gate** — only allow bear entry if the **last L days** lost at least `entry_ret_thresh` **and** current drawdown ≤ `entry_dd_thresh`.  
-  *TSLA example:* L=10, thresh=−1% and −3% protects against calling bear in the middle of a rally.
-- **entry_ret_lookback** — L above.  
-- **entry_ret_thresh** — cumulative return over L days must be **≤** this (often negative).  
-- **entry_dd_thresh** — drawdown must already be at least this negative value.  
-- **trend_gate** — require price/EMA20 **under** EMA100 at entry.  
-- **trend_exit_cross** — exit bear when price/EMA20 crosses **above** EMA100.  
-- **min_bear_run / min_bull_run** — delete tiny islands so plots are legible.
+**Gates & cleanup**
+- **direction_gate** — only allow bear entry if last L days were weak (≤ entry_ret_thresh) **and** current drawdown ≤ entry_dd_thresh.  
+- **trend_gate** — require price/EMA20 under EMA100 at entry.  
+- **trend_exit_cross** — exit bear on cross up of price/EMA20 over EMA100.  
+- **min_bear_run / min_bull_run** — delete tiny 1–2 day islands for readability.
 
 **Auto thresholds (optional)**
-- **auto_thresholds** — learn realistic enter/exit from recent years.  
-- **bear_target** — target share of bear days in that window (e.g., 0.32 = 32%).  
-- **auto_window_years** — how far back to learn from (e.g., last 5 years).  
-- **min_gap** — minimum spacing between the learned enter and exit so they aren’t equal.
+- **auto_thresholds** — learn enter/exit from recent years with **bear_target** share.  
+- **auto_window_years** — how far back to learn from.  
+- **min_gap** — minimum spacing between enter and exit so they aren’t equal.
 
-**Figure settings**
-- **fig_w / fig_h / dpi** — chart size and clarity.  
-- **zoom_years** — controls the last-N-years window used by the **EMA plot (last years)** and the **regime plot**.
-
-**How to describe to a recruiter**
-- We **separate** detection (HMM) from **presentation rules** (hysteresis, confirmations, gates).  
-- **Candidate bear** appears when probability is high; **confirmed bear** requires weak trend and/or real drawdown for several days.  
-- If price **rallies hard** (bounce or trend cross), we **exit bear quickly**.  
-- TSLA examples in the sidebar mirror what you’ll see on the zoomed regime chart.
+**Color key**
+- Light red = candidate bear (probability crossed ENTER).  
+- Dark red = confirmed bear (weak trend/drawdown persisted).  
 """
 )
-
 st.caption("Author: Dr. Poulami Nandi · Research demo only. Not investment advice.")
