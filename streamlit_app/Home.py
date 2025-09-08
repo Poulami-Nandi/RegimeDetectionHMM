@@ -1,16 +1,16 @@
-# streamlit_app/Home.py  — force full-history chart + explicit diagnostics
+# streamlit_app/Home.py  — crisp, zoomable charts (Plotly) + hi-res downloads
+import io
 import inspect
 from datetime import date
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import streamlit as st
 
 st.set_page_config(page_title="TSLA Regime Detection", layout="wide")
-st.title("TSLA Regime Detection — HMM + Human-Readable Rules")
+st.title("TSLA Regime Detection — HMM + Human-Readable Rules (Crisp Zoom Charts)")
 st.caption("Full-history price with EMAs (IPO→today) + last-N-years regime view. Data via Yahoo Finance at runtime.")
 
-# ---------- Import your pipeline ----------
+# ---------------- Import your pipeline ----------------
 try:
     from src.regime_detection import detect_regimes
     PIPELINE_IMPORT_ERROR = None
@@ -18,7 +18,7 @@ except Exception as e:
     detect_regimes = None
     PIPELINE_IMPORT_ERROR = e
 
-# ---------- Sidebar controls ----------
+# ---------------- Sidebar controls ----------------
 st.sidebar.header("Configuration")
 
 with st.sidebar.expander("General", expanded=True):
@@ -58,14 +58,12 @@ with st.sidebar.expander("Auto thresholds (optional, adaptive)", expanded=False)
     min_gap = st.slider("Min gap between enter and exit", 0.02, 0.40, 0.10, 0.01)
 
 with st.sidebar.expander("Figure settings", expanded=False):
-    fig_w = st.slider("Figure width", 8, 20, 16, 1)
-    fig_h = st.slider("Figure height", 4, 10, 7, 1)
-    dpi = st.slider("DPI (clarity)", 100, 600, 300, 50)
     zoom_years = st.slider("Zoom window (last N years)", 1, 5, 3, 1)
+    download_scale = st.slider("Download image scale (higher = more pixels)", 2, 8, 5, 1)
 
 st.sidebar.info("ℹ️ Light red = candidate bear (probability crossed ENTER). Dark red = confirmed bear (weak trend/drawdown persisted).")
 
-# ---------- Guardrail on import failure ----------
+# ---------------- Guardrail on import failure ----------------
 if detect_regimes is None:
     st.error(
         "Couldn't import pipeline: `from src.regime_detection import detect_regimes` failed.\n\n"
@@ -76,6 +74,7 @@ if detect_regimes is None:
 
 ticker = "TSLA"
 
+# ---------------- Safe pipeline call ----------------
 def call_detect_regimes_safely():
     sig = inspect.signature(detect_regimes)
     params = set(sig.parameters.keys())
@@ -110,7 +109,7 @@ def call_detect_regimes_safely():
         end="today",
     )
 
-    # map synonyms for older versions
+    # Back-compat synonyms
     if "prob_threshold" in params and "bear_enter" not in params:
         pref["prob_threshold"] = float(bear_enter)
     if "prob_threshold_exit" in params and "bear_exit" not in params:
@@ -140,86 +139,142 @@ if not isinstance(df, pd.DataFrame) or df.empty:
     st.error("Pipeline returned an empty DataFrame. Try different settings.")
     st.stop()
 
-# Ensure EMAs exist for plotting
+# Ensure EMAs exist
 if "sma20" not in df.columns:
     df["sma20"] = df["Close"].ewm(span=20, adjust=False).mean()
 if "sma100" not in df.columns:
     df["sma100"] = df["Close"].ewm(span=100, adjust=False).mean()
 
-# ---------- Independent FULL HISTORY for chart A ----------
+# ---------------- Independent FULL HISTORY for chart A ----------------
 @st.cache_data(ttl=6*3600, show_spinner=False)
 def fetch_full_history(tkr: str) -> pd.DataFrame:
     import yfinance as yf
     raw = yf.download(tkr, period="max", interval="1d", auto_adjust=True, progress=False)
     if raw is None or raw.empty:
-        return pd.DataFrame()  # signal failure
-    raw.index = pd.to_datetime(raw.index)
+        return pd.DataFrame()
     out = raw[["Close"]].copy()
+    out.index = pd.to_datetime(out.index)
     out["sma20"] = out["Close"].ewm(span=20, adjust=False).mean()
     out["sma100"] = out["Close"].ewm(span=100, adjust=False).mean()
     return out.dropna()
 
 df_full = fetch_full_history(ticker)
 
-# Diagnostics: how big are the windows?
 span_full = (df_full.index.max() - df_full.index.min()).days/365.25 if not df_full.empty else 0.0
 span_pipe = (df.index.max() - df.index.min()).days/365.25
 st.caption(f"Diagnostic — full-history span: {span_full:.1f}y; pipeline span: {span_pipe:.1f}y; zoom window: {int(zoom_years)}y")
 
 if df_full.empty:
-    st.warning("Couldn't fetch full history from Yahoo (network blocked or rate-limited). "
-               "Showing pipeline window in the first chart too.")
+    st.warning("Couldn't fetch full history from Yahoo. Showing pipeline window in the first chart too.")
     df_full = df.copy()
 
-# ---------- Build last-N-years slice for other charts ----------
+# ---------------- Slice last N years ----------------
 cutoff = df.index.max() - pd.DateOffset(years=int(zoom_years))
 dfz = df[df.index >= cutoff].copy()
 
-# ---------- Plot A: Full history Close + EMAs (IPO → today) ----------
-st.subheader("TSLA — Close with EMA20 / EMA100 (IPO → today)")
-fig_full, ax_full = plt.subplots(figsize=(int(fig_w), int(fig_h)), dpi=int(dpi))
-ax_full.plot(df_full.index, df_full["Close"], label="TSLA Close", linewidth=1.2)
-ax_full.plot(df_full.index, df_full["sma20"], label="EMA20 (fast)", linewidth=1)
-ax_full.plot(df_full.index, df_full["sma100"], label="EMA100 (slow)", linewidth=1)
-ax_full.set_xlabel("Date"); ax_full.set_ylabel("Price (USD)")
-ax_full.legend(loc="upper left"); ax_full.grid(alpha=0.25)
-st.pyplot(fig_full, use_container_width=True)
+# ---------------- Plot helpers (Plotly) ----------------
+import plotly.graph_objects as go
 
-# ---------- Plot B: Close + EMAs (last N years only) ----------
-st.subheader(f"TSLA — Close with EMA20 / EMA100 (last {int(zoom_years)} years)")
-fig_last, ax_last = plt.subplots(figsize=(int(fig_w), int(fig_h)), dpi=int(dpi))
-ax_last.plot(dfz.index, dfz["Close"], label="TSLA Close", linewidth=1.2)
-ax_last.plot(dfz.index, dfz["sma20"], label="EMA20 (fast)", linewidth=1)
-ax_last.plot(dfz.index, dfz["sma100"], label="EMA100 (slow)", linewidth=1)
-ax_last.set_xlabel("Date"); ax_last.set_ylabel("Price (USD)")
-ax_last.legend(loc="upper left"); ax_last.grid(alpha=0.25)
-st.pyplot(fig_last, use_container_width=True)
+PLOT_CONFIG = {
+    "displaylogo": False,
+    "modeBarButtonsToAdd": ["drawline", "eraseshape"],
+    "toImageButtonOptions": {
+        "format": "png",
+        "filename": "TSLA_chart",
+        "width": 2400,      # ~4K wide
+        "height": 1200,
+        "scale": 1          # users can also use the slider below for bigger exports
+    }
+}
 
-# ---------- Plot C: Regimes (last N years only) ----------
-def shade_regions(ax, dates, mask, color, alpha, label):
+def figure_base(title: str):
+    fig = go.Figure()
+    fig.update_layout(
+        title=title,
+        margin=dict(l=40, r=20, t=60, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.15)"),
+        yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.15)"),
+        template="plotly_white",
+    )
+    return fig
+
+def add_close_ema(fig, frame: pd.DataFrame, name_prefix="TSLA"):
+    fig.add_trace(go.Scatter(
+        x=frame.index, y=frame["Close"], name=f"{name_prefix} Close",
+        mode="lines", line=dict(width=1.6, color="black")
+    ))
+    fig.add_trace(go.Scatter(
+        x=frame.index, y=frame["sma20"], name="EMA20 (fast)",
+        mode="lines", line=dict(width=1.2)
+    ))
+    fig.add_trace(go.Scatter(
+        x=frame.index, y=frame["sma100"], name="EMA100 (slow)",
+        mode="lines", line=dict(width=1.2)
+    ))
+
+def add_vrect_segments(fig, dates, mask, rgba, name_for_legend):
+    """Shade contiguous True regions of mask with vrects; add a single dummy trace for legend."""
     if mask is None or not bool(mask.any()):
         return
-    in_run, start, first = False, None, True
+    # legend proxy
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None],
+        mode="lines",
+        line=dict(color=rgba.replace("0.2", "1.0"), width=10),
+        name=name_for_legend,
+        showlegend=True
+    ))
+    in_run, start = False, None
     vals = mask.values
     for i, on in enumerate(vals):
         if on and not in_run:
             in_run, start = True, dates[i]
-        is_last = (i == len(vals) - 1)
-        if in_run and (not on or is_last):
+        last = (i == len(vals) - 1)
+        if in_run and (not on or last):
             end = dates[i]
-            ax.axvspan(start, end, color=color, alpha=alpha, label=label if first else None)
-            first, in_run, start = False, False, None
+            fig.add_vrect(
+                x0=start, x1=end,
+                fillcolor=rgba, line_width=0, layer="below"
+            )
+            in_run, start = False, None
 
-st.subheader(f"TSLA — Regimes (last {int(zoom_years)} years; light red=candidate, dark red=confirmed)")
-fig_reg, ax_reg = plt.subplots(figsize=(int(fig_w), int(fig_h)), dpi=int(dpi))
-ax_reg.plot(dfz.index, dfz["Close"], color="black", linewidth=1.0, label="TSLA Close")
-ax_reg.plot(dfz.index, dfz["sma20"], color="tab:blue", linewidth=0.8, alpha=0.7, label="EMA20")
-ax_reg.plot(dfz.index, dfz["sma100"], color="tab:orange", linewidth=0.8, alpha=0.7, label="EMA100")
+def hi_res_download_buttons(fig, base_filename: str, scale: int):
+    try:
+        import plotly.io as pio
+        png_bytes = pio.to_image(fig, format="png", width=2400*scale//5, height=1200*scale//5, scale=5)
+        st.download_button(
+            f"⬇️ Download PNG ({(2400*scale//5)}x{(1200*scale//5)} @x5)",
+            data=png_bytes, file_name=f"{base_filename}_{(2400*scale//5)}x{(1200*scale//5)}.png",
+            mime="image/png"
+        )
+    except Exception as e:
+        st.caption("PNG download requires 'kaleido'. If missing on the host, use the camera icon in the chart toolbar instead.")
 
+# ---------------- Plot A: Full history Close + EMAs (IPO→today) ----------------
+fig_full = figure_base("TSLA — Close with EMA20 / EMA100 (IPO → today)")
+add_close_ema(fig_full, df_full)
+st.plotly_chart(fig_full, use_container_width=True, config=PLOT_CONFIG)
+with st.expander("Download full-history chart (high resolution)"):
+    hi_res_download_buttons(fig_full, "TSLA_full_history", download_scale)
+
+# ---------------- Plot B: Close + EMAs (last N years) ----------------
+fig_last = figure_base(f"TSLA — Close with EMA20 / EMA100 (last {int(zoom_years)} years)")
+add_close_ema(fig_last, dfz)
+st.plotly_chart(fig_last, use_container_width=True, config=PLOT_CONFIG)
+with st.expander("Download last-N-years chart (high resolution)"):
+    hi_res_download_buttons(fig_last, f"TSLA_close_ema_last{int(zoom_years)}y", download_scale)
+
+# ---------------- Plot C: Regimes (last N years) ----------------
+fig_reg = figure_base(f"TSLA — Regimes (last {int(zoom_years)} years)")
+add_close_ema(fig_reg, dfz)  # price + EMAs on top
+
+# Build candidate/confirmed masks
 conf_z = (dfz["regime"] == 1) if "regime" in dfz.columns else None
 cand_z = None
 if "p_bear_ema" in dfz.columns:
     cand_z = dfz["p_bear_ema"] >= float(bear_enter)
+    # exclude confirmed portions from candidate, if present
     if "bear_confirm" in dfz.columns:
         cand_z = cand_z & (~dfz["bear_confirm"].astype(bool))
     if conf_z is not None:
@@ -227,49 +282,58 @@ if "p_bear_ema" in dfz.columns:
 elif "bear_candidate" in dfz.columns:
     cand_z = dfz["bear_candidate"].astype(bool)
 
+# Shade
 if cand_z is not None and cand_z.any():
-    shade_regions(ax_reg, dfz.index, cand_z, color="red", alpha=0.25, label="Bear (candidate)")
+    add_vrect_segments(fig_reg, dfz.index, cand_z, "rgba(255,0,0,0.22)", "Bear (candidate)")
 if conf_z is not None and conf_z.any():
-    shade_regions(ax_reg, dfz.index, conf_z, color="red", alpha=0.50, label="Bear (confirmed)")
+    add_vrect_segments(fig_reg, dfz.index, conf_z, "rgba(255,0,0,0.45)", "Bear (confirmed)")
 
-ax_reg.set_xlabel("Date"); ax_reg.set_ylabel("Price (USD)")
-ax_reg.legend(loc="upper left"); ax_reg.grid(alpha=0.25)
-st.pyplot(fig_reg, use_container_width=True)
+st.plotly_chart(fig_reg, use_container_width=True, config=PLOT_CONFIG)
+with st.expander("Download regimes chart (high resolution)"):
+    hi_res_download_buttons(fig_reg, f"TSLA_regimes_last{int(zoom_years)}y", download_scale)
 
-# ---------- Explainer ----------
+# ---------------- Explainer ----------------
 st.markdown("---")
 st.markdown("## Parameter explainer")
 st.markdown(
     """
 **Acronyms**
-- **HMM:** Hidden Markov Model (unsupervised model that assigns a hidden “state” to each day).
-- **EMA:** Exponential Moving Average (recent prices weighted more than older prices).
+- **HMM:** Hidden Markov Model — unsupervised model that assigns a hidden “state” to each day.
+- **EMA:** Exponential Moving Average — recent prices weighted more than older prices.
 
 **General**
-- **n_components** — number of hidden states the HMM can use.  
-- **ema_span** — smoothing for probability; bigger = steadier.  
-- **k_forward** — for naming states (look-ahead labeling), not trading.
+- **n_components** — number of hidden states the HMM can use.
+- **ema_span** — smoothing for daily bear probability; bigger = steadier.
+- **k_forward** — look-ahead days used only to *name* states (bullish vs bearish behavior).
 
 **Hysteresis thresholds**
-- **bear_enter** — create a **bear candidate** above this prob.  
-- **bear_exit** — exit bear below this prob (keeps flip-flops away).
+- **bear_enter** — create a *bear candidate* when smoothed bear probability rises above this.
+- **bear_exit** — exit bear when it falls below this (prevents flip-flops).
 
-**Bear confirmations**
-- **mom_threshold** — EMA20 under EMA100 by ~X of price.  
-- **ddown_threshold** — price X below recent peak.  
-- **confirm_days** — consecutive days those must hold.
+**Bear confirmations (turn candidate → confirmed)**
+- **mom_threshold** — EMA20 under EMA100 by ~X of price (trend weakness).
+- **ddown_threshold** — price ~X below a recent peak (drawdown).
+- **confirm_days** — number of consecutive days those must hold.
 
-**Bull confirms & early exits**
-- **bull_mom_threshold**, **bull_ddown_exit**, **confirm_days_bull** — strength checks to end bear.  
-- **bear_profit_exit** — quick exit if price rallies +X% since bear entry.
+**Bull confirms & early exits (to end bear)**
+- **bull_mom_threshold** — EMA20 above EMA100 by ~X.
+- **bull_ddown_exit** — drawdown recovered toward peak (e.g., within 6%).
+- **confirm_days_bull** — consecutive days those must hold.
+- **bear_profit_exit** — if price rallies +X% from the bear entry, exit quickly even if probability lags.
 
 **Gates & cleanup**
-- **direction_gate**, **entry_ret_lookback**, **entry_ret_thresh**, **entry_dd_thresh** — only allow bear entry when tape is weak.  
-- **trend_gate**, **trend_exit_cross** — trend filters/exits using EMAs.  
+- **direction_gate** — only allow bear entry if last L-day return ≤ threshold *and* current drawdown ≤ threshold.
+- **trend_gate** — require price/EMA20 under EMA100 at entry.
+- **trend_exit_cross** — exit bear on cross up of price/EMA20 over EMA100.
 - **min_bear_run / min_bull_run** — remove tiny islands for clarity.
 
 **Auto thresholds (optional)**
-- **auto_thresholds**, **bear_target**, **auto_window_years**, **min_gap** — learn enter/exit from recent years.
+- **auto_thresholds** — learn enter/exit from recent years to hit **bear_target** share.
+- **auto_window_years** — how far back to learn from.
+- **min_gap** — minimum spacing between enter and exit so they aren’t equal.
+
+**Tip for downloads:** Use the camera icon in each chart (modebar) to export PNG.  
+These charts are SVG in the browser (vector), so zoom stays crisp while presenting.
 """
 )
 st.caption("Author: Dr. Poulami Nandi · Research demo only. Not investment advice.")
