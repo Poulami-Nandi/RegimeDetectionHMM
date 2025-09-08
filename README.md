@@ -65,10 +65,11 @@ ROBO
   ![Market Regime for QTUM ETF](https://github.com/Poulami-Nandi/RegimeDetectionHMM/blob/main/images/results/sample/market_regime_qtum.png)  
 
 ---
-## Streamlit dashboard  
+## Streamlit
 
 Prepared streamlit dashborad for highly volatile stock Tesla(last 3y)
 https://regimedetectionhmm-mkn4ypczlw7vojrqr95bwp.streamlit.app
+
 ---
 
 ## 🎯 Future Enhancements
