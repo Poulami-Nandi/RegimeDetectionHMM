@@ -23,6 +23,32 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 
+# ---- add near the top of Home.py (after other imports) ----
+import io, zipfile
+import pandas as pd
+
+def _csv_bytes(obj, float_format="%.6f") -> bytes:
+    """
+    Convert a Series/DataFrame (or something convertible) to CSV bytes.
+    Safe on None/missing, keeps index, and formats dates/floats.
+    """
+    if obj is None:
+        return b""
+    if isinstance(obj, pd.Series):
+        obj = obj.to_frame()
+    if not isinstance(obj, pd.DataFrame):
+        try:
+            obj = pd.DataFrame(obj)
+        except Exception:
+            return str(obj).encode("utf-8")
+
+    return obj.to_csv(
+        index=True,
+        date_format="%Y-%m-%d",
+        float_format=float_format,
+    ).encode("utf-8")
+
+
 # Friendly failure if src still isn't importable
 try:
     from src.regime_detection import detect_regimes
