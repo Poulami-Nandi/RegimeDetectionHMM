@@ -317,18 +317,73 @@ download_png(fig2, "Download zoom chart (high-res)", "tsla_last_years.png")
 
 # ======================= RUN PIPELINE (TSLA only) =======================
 from src.regime_detection import detect_regimes  # your pipeline
+def _call_detect_regimes_flexible(func, **vals):
+    """
+    Map our concept values to whatever parameter names `detect_regimes` supports.
+    Returns (df, model) where model may be None if your function returns only df.
+    """
+    sig = inspect.signature(func)
+    params = set(sig.parameters.keys())
 
-# 🔁 If your function uses different argument names, map them here.
-df, model = detect_regimes(
+    out = {}
+
+    def put(names, value):
+        """Assign `value` to the first name in `names` that exists in func params."""
+        for name in names:
+            if name in params:
+                out[name] = value
+                return
+
+    # always try these core ones
+    put(["ticker"],                 vals.get("ticker"))
+    put(["start"],                  vals.get("start"))
+    put(["end"],                    vals.get("end"))
+    put(["n_components"],           vals.get("n_components"))
+
+    # common aliases across your versions
+    put(["k_forward", "k_fwd"],                         vals.get("k_forward"))
+    put(["ema_span", "ema"],                            vals.get("ema_span"))
+    put(["prob_threshold", "bear_enter", "enter_prob",
+         "enter_threshold"],                            vals.get("bear_enter"))
+    put(["prob_exit", "bear_exit", "exit_prob",
+         "exit_threshold"],                             vals.get("bear_exit"))
+    put(["min_run", "min_bear_run"],                    vals.get("min_bear_run"))
+    put(["min_bull_run"],                               vals.get("min_bull_run"))
+    put(["mom_threshold", "mom_thr"],                   vals.get("mom_threshold"))
+    put(["ddown_threshold", "dd_thr", "drawdown_threshold"],
+                                                     vals.get("ddown_threshold"))
+    put(["confirm_days", "confirm_bear"],               vals.get("confirm_days"))
+    put(["bull_mom_threshold", "bull_mom_thr"],         vals.get("bull_mom_threshold"))
+    put(["bull_ddown_exit", "bull_dd_exit"],            vals.get("bull_ddown_exit"))
+    put(["confirm_days_bull", "confirm_bull"],          vals.get("confirm_days_bull"))
+    put(["direction_gate"],                             vals.get("direction_gate"))
+    put(["trend_gate"],                                 vals.get("trend_gate"))
+    put(["entry_ret_lookback", "lbk", "lookback"],      vals.get("entry_ret_lookback"))
+    put(["entry_ret_thresh", "entry_ret_thr"],          vals.get("entry_ret_thresh"))
+    put(["entry_ddown_thresh", "entry_dd_thr"],         vals.get("entry_ddown_thresh"))
+    put(["bear_profit_exit", "profit_exit"],            vals.get("bear_profit_exit"))
+    put(["strict"],                                     vals.get("strict"))
+
+    res = func(**out)
+    # Normalize return
+    if isinstance(res, tuple):
+        if len(res) >= 2:
+            return res[0], res[1]
+        return res[0], None
+    return res, None
+
+
+df, model = _call_detect_regimes_flexible(
+    detect_regimes,
     ticker=ticker,
     start="2000-01-01",
     end="today",
     n_components=n_components,
     k_forward=k_forward,
     ema_span=ema_span,
-    prob_threshold=bear_enter,       # enter threshold
-    prob_exit=bear_exit,             # exit threshold
-    min_run=min_bear_run,            # if you separate bull/bear mins, pass accordingly
+    bear_enter=bear_enter,
+    bear_exit=bear_exit,
+    min_bear_run=min_bear_run,
     min_bull_run=min_bull_run,
     mom_threshold=mom_threshold,
     ddown_threshold=ddown_threshold,
@@ -337,13 +392,14 @@ df, model = detect_regimes(
     bull_ddown_exit=bull_ddown_exit,
     confirm_days_bull=confirm_days_bull,
     direction_gate=direction_gate,
+    trend_gate=trend_gate,
     entry_ret_lookback=entry_ret_lookback,
     entry_ret_thresh=entry_ret_thresh,
     entry_ddown_thresh=entry_ddown_thresh,
-    trend_gate=trend_gate,
     bear_profit_exit=bear_profit_exit,
     strict=strict,
 )
+
 
 # df is assumed to have columns: 'Close', optional 'ema20'/'ema100',
 # 'bear_candidate' (bool/int), 'bear_confirm' (bool/int).
