@@ -97,14 +97,22 @@ def plot_close_emas(df: pd.DataFrame, title: str, h=440) -> go.Figure:
             fig.add_trace(go.Scatter(x=df.index, y=df["EMA100"], name="EMA100 (slow)",
                                      mode="lines", line=dict(width=1.8, color="#63b3a4")))
     fig.update_layout(
-        title=title,
+        title=dict(text=title, pad=dict(b=32)),  
         template="plotly_white",
         height=h,
-        margin=dict(l=10, r=10, t=46, b=10),
-        legend=dict(orientation="h", y=1.1, x=0),
-        xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
-        yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
+        margin=dict(l=10, r=10, t=80, b=10),     
+        legend=dict(
+            orientation="h",
+            x=0,
+            xanchor="left",
+            y=1.02,
+            yanchor="bottom",                    
+            bgcolor="rgba(255, 255, 255, 0.8)"    
+        ),
+        xaxis=dict(showgrid=True, gridcolor="rgba(0, 0, 0, 0.08)"),
+        yaxis=dict(showgrid=True, gridcolor="rgba(0, 0, 0, 0.08)"),
     )
+
     return fig
 
 def add_bear_shading(fig: go.Figure, df_full: pd.DataFrame, df_view: pd.DataFrame,
@@ -271,11 +279,25 @@ with st.spinner("Computing regimes (HMM + rules)…"):
 
 # Regime chart = last N years only
 fig3 = plot_close_emas(px_zoom, f"TSLA — Regimes (last {zoom_years} years; light=candidate, dark=confirmed)", h=480)
-try:
-    add_bear_shading(fig3, df_reg, px_zoom, "bear_candidate", opacity=0.12)
-    add_bear_shading(fig3, df_reg, px_zoom, "bear_confirm",   opacity=0.30)
-except Exception as e:
-    st.warning(f"Could not shade regimes: {e}")
+
+# NEW shading: show candidate-only as (candidate AND NOT confirmed), then confirmed on top
+if {"bear_candidate", "bear_confirm"}.issubset(df_reg.columns):
+    cand_only = df_reg["bear_candidate"].astype(bool) & (~df_reg["bear_confirm"].astype(bool))
+    # (optional) align to px_zoom index in case of any index differences
+    cand_only = cand_only.reindex(px_zoom.index, fill_value=False)
+
+    df_tmp = df_reg.reindex(px_zoom.index).copy()
+    df_tmp["_cand_only"] = cand_only
+
+    add_bear_shading(fig3, df_tmp, px_zoom, "_cand_only", opacity=0.12)  # light red
+    add_bear_shading(fig3, df_reg, px_zoom, "bear_confirm", opacity=0.30)  # dark red
+else:
+    # fallback if only one column exists
+    if "bear_candidate" in df_reg.columns:
+        add_bear_shading(fig3, df_reg, px_zoom, "bear_candidate", 0.12)
+    if "bear_confirm" in df_reg.columns:
+        add_bear_shading(fig3, df_reg, px_zoom, "bear_confirm", 0.30)
+
 st.plotly_chart(fig3, use_container_width=True, theme="streamlit")
 download_png(fig3, "Download regimes chart (high-res)", "tsla_regimes_last_years.png")
 
