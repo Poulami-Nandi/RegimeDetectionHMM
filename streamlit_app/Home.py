@@ -1,4 +1,4 @@
-import os
+# streamlit_app/Home.py  — force full-history chart + explicit diagnostics
 import inspect
 from datetime import date
 import numpy as np
@@ -8,9 +8,9 @@ import streamlit as st
 
 st.set_page_config(page_title="TSLA Regime Detection", layout="wide")
 st.title("TSLA Regime Detection — HMM + Human-Readable Rules")
-st.caption("Full-history price with EMAs (from IPO) + last-N-years regime view. Data via Yahoo Finance at runtime.")
+st.caption("Full-history price with EMAs (IPO→today) + last-N-years regime view. Data via Yahoo Finance at runtime.")
 
-# -------- Import your pipeline --------
+# ---------- Import your pipeline ----------
 try:
     from src.regime_detection import detect_regimes
     PIPELINE_IMPORT_ERROR = None
@@ -18,7 +18,7 @@ except Exception as e:
     detect_regimes = None
     PIPELINE_IMPORT_ERROR = e
 
-# -------- Sidebar controls --------
+# ---------- Sidebar controls ----------
 st.sidebar.header("Configuration")
 
 with st.sidebar.expander("General", expanded=True):
@@ -63,11 +63,9 @@ with st.sidebar.expander("Figure settings", expanded=False):
     dpi = st.slider("DPI (clarity)", 100, 600, 300, 50)
     zoom_years = st.slider("Zoom window (last N years)", 1, 5, 3, 1)
 
-st.sidebar.info(
-    "ℹ️ Light red = candidate bear (probability crossed ENTER). Dark red = confirmed bear (weak trend/drawdown persisted)."
-)
+st.sidebar.info("ℹ️ Light red = candidate bear (probability crossed ENTER). Dark red = confirmed bear (weak trend/drawdown persisted).")
 
-# -------- Guardrail on import failure --------
+# ---------- Guardrail on import failure ----------
 if detect_regimes is None:
     st.error(
         "Couldn't import pipeline: `from src.regime_detection import detect_regimes` failed.\n\n"
@@ -107,12 +105,12 @@ def call_detect_regimes_safely():
         bear_target=float(bear_target),
         auto_window_years=int(auto_window_years),
         min_gap=float(min_gap),
-        return_debug=True,     # if supported
-        start="2010-01-01",    # ask for full history explicitly if supported
-        end="today",           # explicit end label
+        return_debug=True,
+        start="2010-01-01",
+        end="today",
     )
 
-    # Synonyms for older versions
+    # map synonyms for older versions
     if "prob_threshold" in params and "bear_enter" not in params:
         pref["prob_threshold"] = float(bear_enter)
     if "prob_threshold_exit" in params and "bear_exit" not in params:
@@ -125,19 +123,14 @@ def call_detect_regimes_safely():
         pref["from"] = "2010-01-01"
     if "to" in params and "end" not in params:
         pref["to"] = "today"
-    if "start_date" in params and "start" not in params:
-        pref["start_date"] = "2010-01-01"
-    if "end_date" in params and "end" not in params:
-        pref["end_date"] = "today"
     if "full_history" in params:
         pref["full_history"] = True
 
     filtered = {k: v for k, v in pref.items() if k in params}
-
     try:
         return detect_regimes(**filtered)
     except TypeError as e:
-        st.warning("Falling back to a minimal call due to a version mismatch.\n\n" + str(e))
+        st.warning("Falling back to minimal call due to signature mismatch: " + str(e))
         return detect_regimes(ticker=ticker, n_components=int(n_components))
 
 with st.spinner("Downloading data & computing regimes..."):
@@ -147,39 +140,38 @@ if not isinstance(df, pd.DataFrame) or df.empty:
     st.error("Pipeline returned an empty DataFrame. Try different settings.")
     st.stop()
 
-# Ensure EMAs exist (fallbacks)
+# Ensure EMAs exist for plotting
 if "sma20" not in df.columns:
     df["sma20"] = df["Close"].ewm(span=20, adjust=False).mean()
 if "sma100" not in df.columns:
     df["sma100"] = df["Close"].ewm(span=100, adjust=False).mean()
 
-# ---------- Build a true full-history series for the FIRST chart ----------
-# Some pipeline versions return only a recent window. If the span is too short,
-# fetch full history via yfinance just for the first (IPO→today) chart.
-def get_full_history_df():
-    try:
-        # If we already have ≥ 8 years, use it; otherwise fetch.
-        if (df.index.max() - df.index.min()) >= pd.DateOffset(years=8):
-            base = df.copy()
-        else:
-            import yfinance as yf
-            raw = yf.download(ticker, start="2010-01-01", auto_adjust=True, progress=False)
-            if raw.empty:
-                base = df.copy()
-            else:
-                raw.rename(columns=str.title, inplace=True)  # Close, Open, etc.
-                base = raw[["Close"]].copy()
-        if "sma20" not in base.columns:
-            base["sma20"] = base["Close"].ewm(span=20, adjust=False).mean()
-        if "sma100" not in base.columns:
-            base["sma100"] = base["Close"].ewm(span=100, adjust=False).mean()
-        return base.dropna()
-    except Exception:
-        return df.copy()
+# ---------- Independent FULL HISTORY for chart A ----------
+@st.cache_data(ttl=6*3600, show_spinner=False)
+def fetch_full_history(tkr: str) -> pd.DataFrame:
+    import yfinance as yf
+    raw = yf.download(tkr, period="max", interval="1d", auto_adjust=True, progress=False)
+    if raw is None or raw.empty:
+        return pd.DataFrame()  # signal failure
+    raw.index = pd.to_datetime(raw.index)
+    out = raw[["Close"]].copy()
+    out["sma20"] = out["Close"].ewm(span=20, adjust=False).mean()
+    out["sma100"] = out["Close"].ewm(span=100, adjust=False).mean()
+    return out.dropna()
 
-df_full = get_full_history_df()
+df_full = fetch_full_history(ticker)
 
-# ---------- Build last-N years slice for the other charts ----------
+# Diagnostics: how big are the windows?
+span_full = (df_full.index.max() - df_full.index.min()).days/365.25 if not df_full.empty else 0.0
+span_pipe = (df.index.max() - df.index.min()).days/365.25
+st.caption(f"Diagnostic — full-history span: {span_full:.1f}y; pipeline span: {span_pipe:.1f}y; zoom window: {int(zoom_years)}y")
+
+if df_full.empty:
+    st.warning("Couldn't fetch full history from Yahoo (network blocked or rate-limited). "
+               "Showing pipeline window in the first chart too.")
+    df_full = df.copy()
+
+# ---------- Build last-N-years slice for other charts ----------
 cutoff = df.index.max() - pd.DateOffset(years=int(zoom_years))
 dfz = df[df.index >= cutoff].copy()
 
@@ -255,41 +247,29 @@ st.markdown(
 
 **General**
 - **n_components** — number of hidden states the HMM can use.  
-  *TSLA example:* 4 states can separate “calm bull”, “fast-rising bull”, “choppy bear”, “crash”.
-- **ema_span** — how much we smooth the daily bear probability. Bigger = steadier signal.  
-  *TSLA example:* span=20 filters a lot of noise; span=8 reacts faster but flips more.
-- **k_forward** — only for *naming* states (we look a few days ahead to decide if a state behaves like bull or bear).
+- **ema_span** — smoothing for probability; bigger = steadier.  
+- **k_forward** — for naming states (look-ahead labeling), not trading.
 
 **Hysteresis thresholds**
-- **bear_enter** — create a **bear candidate** when smoothed bear probability rises above this (e.g., 0.80).  
-- **bear_exit** — exit bear when the smoothed probability falls below this (e.g., 0.55).  
-  Two different levels prevent flip-flops.
+- **bear_enter** — create a **bear candidate** above this prob.  
+- **bear_exit** — exit bear below this prob (keeps flip-flops away).
 
-**Bear confirmations (turn candidate → confirmed)**
-- **mom_threshold** — EMA20 under EMA100 by ~X of price (trend weakness).  
-- **ddown_threshold** — price ~X below recent peak (drawdown).  
-- **confirm_days** — how many consecutive days those must hold.
+**Bear confirmations**
+- **mom_threshold** — EMA20 under EMA100 by ~X of price.  
+- **ddown_threshold** — price X below recent peak.  
+- **confirm_days** — consecutive days those must hold.
 
-**Bull confirms & early exits (to end bear)**
-- **bull_mom_threshold** — EMA20 above EMA100 by ~X.  
-- **bull_ddown_exit** — drawdown recovered toward peak (e.g., within 6%).  
-- **confirm_days_bull** — consecutive days those must hold.  
-- **bear_profit_exit** — if price rallies +X% from bear entry, exit quickly even if probability lags.
+**Bull confirms & early exits**
+- **bull_mom_threshold**, **bull_ddown_exit**, **confirm_days_bull** — strength checks to end bear.  
+- **bear_profit_exit** — quick exit if price rallies +X% since bear entry.
 
 **Gates & cleanup**
-- **direction_gate** — only allow bear entry if last L days were weak (≤ entry_ret_thresh) **and** current drawdown ≤ entry_dd_thresh.  
-- **trend_gate** — require price/EMA20 under EMA100 at entry.  
-- **trend_exit_cross** — exit bear on cross up of price/EMA20 over EMA100.  
-- **min_bear_run / min_bull_run** — delete tiny 1–2 day islands for readability.
+- **direction_gate**, **entry_ret_lookback**, **entry_ret_thresh**, **entry_dd_thresh** — only allow bear entry when tape is weak.  
+- **trend_gate**, **trend_exit_cross** — trend filters/exits using EMAs.  
+- **min_bear_run / min_bull_run** — remove tiny islands for clarity.
 
 **Auto thresholds (optional)**
-- **auto_thresholds** — learn enter/exit from recent years with **bear_target** share.  
-- **auto_window_years** — how far back to learn from.  
-- **min_gap** — minimum spacing between enter and exit so they aren’t equal.
-
-**Color key**
-- Light red = candidate bear (probability crossed ENTER).  
-- Dark red = confirmed bear (weak trend/drawdown persisted).  
+- **auto_thresholds**, **bear_target**, **auto_window_years**, **min_gap** — learn enter/exit from recent years.
 """
 )
 st.caption("Author: Dr. Poulami Nandi · Research demo only. Not investment advice.")
