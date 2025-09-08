@@ -65,11 +65,9 @@ ROBO
   ![Market Regime for QTUM ETF](https://github.com/Poulami-Nandi/RegimeDetectionHMM/blob/main/images/results/sample/market_regime_qtum.png)  
 
 ---
-## 📊 Pending Tasks
-- 🔹 Optimize Position Sizing Based on Market Regime Confidence.
-- 🔹 Develop Interactive Dashboards with Streamlit for Visual Reports.
-- 🔹 Fix Alpaca API Issue for Paper Trading Integration.
-
+## Streamlit dashboard
+Prepared streamlit dashborad for highly volatile stock Tesla(last 3y)
+https://regimedetectionhmm-mkn4ypczlw7vojrqr95bwp.streamlit.app
 ---
 
 ## 🎯 Future Enhancements
