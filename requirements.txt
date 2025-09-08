@@ -18,4 +18,4 @@ yfinance==0.2.65
 plotly==6.3.0
 statsmodels==0.14.5
 streamlit>=1.39,<2
-alphalens-reloaded==0.4.5
+kaleido==0.2.1
