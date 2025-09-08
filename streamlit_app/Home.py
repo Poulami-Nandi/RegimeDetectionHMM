@@ -420,28 +420,55 @@ def render_parameter_explainer():
 render_parameter_explainer()
 st.caption("Author: Dr. Poulami Nandi · Research demo only. Not investment advice.")
 
-# Check 1: mask share on the *actual plotted* index
-def _share_true(s): 
-    s = s.astype(bool)
-    return float(s.sum())/len(s) if len(s) else 0.0
+# ===== SAFELY BUILD reg_zoom + DIAGNOSTICS (paste after df_reg/px_zoom exist) =====
+import pandas as pd
 
-cand_share = _share_true(reg_zoom.get("bear_candidate", pd.Series(index=reg_zoom.index, dtype=bool)))
-conf_share = _share_true(reg_zoom.get("bear_confirm",  pd.Series(index=reg_zoom.index, dtype=bool)))
-st.info(f"[Diag] Last {zoom_years}y bear shares — candidate={cand_share:.1%}, confirmed={conf_share:.1%}")
+# 1) Build reg_zoom on the exact index you plotted (fallback = last N years window)
+if "df_reg" in locals():
+    if "px_zoom" in locals() and hasattr(px_zoom, "index"):
+        zoom_idx = px_zoom.index
+    else:
+        # fallback: slice last N years directly from df_reg
+        _end = df_reg.index.max()
+        _start = _end - pd.DateOffset(years=int(zoom_years))
+        zoom_idx = df_reg.loc[_start:_end].index
+    reg_zoom = df_reg.reindex(zoom_idx).copy()
+else:
+    st.warning("Diagnostics skipped: df_reg not found in scope.")
+    reg_zoom = pd.DataFrame()
 
-# Check 2: run-lengths (are we getting a single giant run?)
-runs_txt = []
-for col in ["bear_candidate","bear_confirm"]:
-    if col in reg_zoom:
-        s = reg_zoom[col].astype(bool)
-        rid = (s != s.shift()).cumsum()
-        lens = s.groupby(rid).sum().astype(int)
-        lens = lens[lens > 0]
-        if len(lens):
-            runs_txt.append(f"{col}: runs={len(lens)}, max_run={int(lens.max())} days")
-        else:
-            runs_txt.append(f"{col}: no True runs")
-st.caption(" | ".join(runs_txt))
+# 2) Helpers
+def _share_true(series_like) -> float:
+    if series_like is None or len(series_like) == 0:
+        return 0.0
+    s = pd.Series(series_like, index=getattr(series_like, "index", None)).astype(bool)
+    return float(s.sum()) / float(len(s)) if len(s) else 0.0
+
+# 3) Diagnostics (only if reg_zoom is available)
+if not reg_zoom.empty:
+    # default empty series on the same index if a column is missing
+    _empty = pd.Series(False, index=reg_zoom.index)
+
+    cand_share = _share_true(reg_zoom["bear_candidate"] if "bear_candidate" in reg_zoom else _empty)
+    conf_share = _share_true(reg_zoom["bear_confirm"]  if "bear_confirm"  in reg_zoom else _empty)
+    st.info(f"[Diag] Last {zoom_years}y bear shares — candidate={cand_share:.1%}, confirmed={conf_share:.1%}")
+
+    # Run-lengths (are we getting one giant run?)
+    runs_txt = []
+    for col in ["bear_candidate", "bear_confirm"]:
+        if col in reg_zoom:
+            s = reg_zoom[col].astype(bool)
+            rid = (s != s.shift()).cumsum()
+            lens = s.groupby(rid).sum().astype(int)
+            lens = lens[lens > 0]
+            if len(lens):
+                runs_txt.append(f"{col}: runs={len(lens)}, max_run={int(lens.max())} days")
+            else:
+                runs_txt.append(f"{col}: no True runs")
+    if runs_txt:
+        st.caption(" | ".join(runs_txt))
+# ===== END SAFETY BLOCK =====
+
 
 # ---- DEBUG BUNDLE (download as zip) -----------------------------------------
 import io, zipfile, json, platform, sys
