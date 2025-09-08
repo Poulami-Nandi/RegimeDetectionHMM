@@ -1,4 +1,7 @@
 # streamlit_app/Home.py
+# streamlit_app/Home.py
+from __future__ import annotations
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -7,9 +10,6 @@ import io
 import sys
 import importlib
 import subprocess
-
-# streamlit_app/Home.py
-from __future__ import annotations
 
 # --- make 'src' importable on Streamlit Cloud ---
 import sys, os
