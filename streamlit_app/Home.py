@@ -8,7 +8,33 @@ import sys
 import importlib
 import subprocess
 
-from src.regime_detection import detect_regimes  # your pipeline
+# streamlit_app/Home.py
+from __future__ import annotations
+
+# --- make 'src' importable on Streamlit Cloud ---
+import sys, os
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]  # repo root (one level above streamlit_app)
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+import plotly.graph_objects as go
+import streamlit as st
+import yfinance as yf
+
+# Friendly failure if src still isn't importable
+try:
+    from src.regime_detection import detect_regimes
+except Exception as e:
+    st.set_page_config(page_title="TSLA Regime Detection", layout="wide")
+    st.error(
+        "Could not import pipeline module `src.regime_detection`.\n\n"
+        "Fix by ensuring **src/** exists at the repo root and contains an `__init__.py` file.\n"
+        f"Repo root seen by app: `{REPO_ROOT}`\n\n"
+        f"Underlying import error: {e}"
+    )
+    st.stop()
 
 st.set_page_config(
     page_title="TSLA Regime Detection — HMM + Rules",
