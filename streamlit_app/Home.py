@@ -1,37 +1,28 @@
 # streamlit_app/Home.py
-import os
 import io
 import datetime as dt
-import numpy as np
 import pandas as pd
-import yfinance as yf
 import plotly.graph_objects as go
 import streamlit as st
+import yfinance as yf
 
-# Our regime pipeline
 from src.regime_detection import detect_regimes
 
-# --------------------------------------------------------------------------------------
-# Page config
-# --------------------------------------------------------------------------------------
+# ---------------------- Page config ----------------------
 st.set_page_config(
     page_title="TSLA Regime Detection — HMM + Rules",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# --------------------------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------------------------
+# ---------------------- Helpers --------------------------
 @st.cache_data(show_spinner=False)
-def fetch_full_history(ticker: str) -> pd.DataFrame:
-    """Download full split/adj history (IPO→today)."""
-    df = yf.download(ticker, period="max", auto_adjust=True, progress=False)
+def fetch_full_history_tsla():
+    df = yf.download("TSLA", period="max", auto_adjust=True, progress=False)
     df = df.rename_axis("Date").sort_index()
-    df = df[["Close"]].dropna()
-    return df
+    return df[["Close"]].dropna()
 
-def add_emas(df: pd.DataFrame, fast: int = 20, slow: int = 100) -> pd.DataFrame:
+def add_emas(df: pd.DataFrame, fast=20, slow=100) -> pd.DataFrame:
     out = df.copy()
     out["EMA20"] = out["Close"].ewm(span=fast, adjust=False).mean()
     out["EMA100"] = out["Close"].ewm(span=slow, adjust=False).mean()
@@ -47,93 +38,79 @@ def subset_last_years(df: pd.DataFrame, years: int) -> pd.DataFrame:
 def plot_close_ema(df: pd.DataFrame, title: str) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="TSLA Close",
-                             line=dict(width=2, color="#111111")))
+                             mode="lines", line=dict(width=2, color="#111111")))
     fig.add_trace(go.Scatter(x=df.index, y=df["EMA20"], name="EMA20 (fast)",
-                             line=dict(width=1.6, color="#de6f6f")))
+                             mode="lines", line=dict(width=1.6, color="#de6f6f")))
     fig.add_trace(go.Scatter(x=df.index, y=df["EMA100"], name="EMA100 (slow)",
-                             line=dict(width=1.6, color="#63b3a4")))
+                             mode="lines", line=dict(width=1.6, color="#63b3a4")))
     fig.update_layout(
         title=title,
+        template="plotly_white",
+        height=420,
         margin=dict(l=10, r=10, t=40, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        height=420,
         xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
         yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
     )
     return fig
 
 def plot_regimes_last(df_reg: pd.DataFrame, years: int, title: str) -> go.Figure:
-    """Shade candidate (light) and confirmed (dark) bear zones; show Close & EMAs."""
-    df = subset_last_years(df_reg, years)
-    df = add_emas(df[["Close"]])
+    # last N years view with EMAs and shaded bears
+    df_last = subset_last_years(df_reg[["Close"]], years)
+    df_last = add_emas(df_last)
 
     fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df_last.index, y=df_last["Close"], name="TSLA Close",
+                             mode="lines", line=dict(width=2, color="#111111")))
+    fig.add_trace(go.Scatter(x=df_last.index, y=df_last["EMA20"], name="EMA20 (fast)",
+                             mode="lines", line=dict(width=1.6, color="#de6f6f")))
+    fig.add_trace(go.Scatter(x=df_last.index, y=df_last["EMA100"], name="EMA100 (slow)",
+                             mode="lines", line=dict(width=1.6, color="#63b3a4")))
 
-    # Base lines
-    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="TSLA Close",
-                             line=dict(width=2, color="#111111")))
-    fig.add_trace(go.Scatter(x=df.index, y=df["EMA20"], name="EMA20 (fast)",
-                             line=dict(width=1.6, color="#de6f6f")))
-    fig.add_trace(go.Scatter(x=df.index, y=df["EMA100"], name="EMA100 (slow)",
-                             line=dict(width=1.6, color="#63b3a4")))
-
-    # Shading helper
-    def add_spans(mask: pd.Series, color: str, opacity: float):
-        if mask is None or mask.empty:
-            return
-        in_block = False
-        start = None
+    # Shade candidate (light) and confirmed (dark)
+    def add_spans(mask: pd.Series, opacity: float):
+        mask = mask.reindex(df_last.index).fillna(False).astype(bool)
+        in_blk, start = False, None
         for i, (d, v) in enumerate(mask.items()):
-            if v and not in_block:
-                in_block = True
-                start = d
-            if in_block and (not v or i == len(mask) - 1):
-                # end at previous date (or today if it's the last row and still True)
+            if v and not in_blk:
+                in_blk, start = True, d
+            if in_blk and (not v or i == len(mask) - 1):
                 end = d if not v else d
-                fig.add_vrect(
-                    x0=start, x1=end,
-                    fillcolor=color, opacity=opacity, layer="below",
-                    line_width=0,
-                )
-                in_block = False
+                fig.add_vrect(x0=start, x1=end, fillcolor="#d62728",
+                              opacity=opacity, layer="below", line_width=0)
+                in_blk = False
 
-    # Candidate (light), Confirmed (dark)
-    cand = df_reg.reindex(df.index)["bear_candidate"].fillna(False).astype(bool) if "bear_candidate" in df_reg else pd.Series(False, index=df.index)
-    conf = df_reg.reindex(df.index)["bear_confirm"].fillna(False).astype(bool) if "bear_confirm" in df_reg else pd.Series(False, index=df.index)
-    add_spans(cand, "#d62728", 0.12)
-    add_spans(conf, "#d62728", 0.30)
+    if "bear_candidate" in df_reg.columns:
+        add_spans(df_reg["bear_candidate"], 0.12)
+    if "bear_confirm" in df_reg.columns:
+        add_spans(df_reg["bear_confirm"], 0.30)
 
     fig.update_layout(
         title=title,
+        template="plotly_white",
+        height=460,
         margin=dict(l=10, r=10, t=40, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        height=460,
         xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
         yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
     )
     return fig
 
-def download_png_button(fig: go.Figure, label: str):
-    """High-res PNG download; handles kaleido absence nicely."""
+def download_png_button(fig: go.Figure, label: str, filename: str):
     try:
         png = fig.to_image(format="png", scale=6, width=2000, height=900)
-        st.download_button(label, data=png, file_name=label.lower().replace(" ", "_") + ".png", mime="image/png")
-    except Exception as e:
+        st.download_button(label, data=png, file_name=filename, mime="image/png")
+    except Exception:
         with st.expander("PNG download (host is missing kaleido)"):
-            st.info(
-                "PNG export requires `kaleido`. If not available on the host, "
-                "use the camera icon in the chart toolbar to save a PNG."
-            )
+            st.info("PNG export needs `kaleido`. If not present, use the camera icon on the chart toolbar.")
 
-# --------------------------------------------------------------------------------------
-# Sidebar controls (kept minimal; regimes will use these)
-# --------------------------------------------------------------------------------------
+# ---------------------- Sidebar (KEEP YOUR KNOBS) --------
 st.sidebar.header("Controls")
-ticker = st.sidebar.text_input("Ticker", value="TSLA")
-zoom_years = st.sidebar.slider("Zoom window (years)", min_value=1, max_value=10, value=3, step=1)
+zoom_years = st.sidebar.slider("Zoom window (years)", 1, 10, 3, 1)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Regime knobs")
+# Keep the same defaults you had earlier
 n_components = st.sidebar.selectbox("HMM states (n_components)", [2, 3, 4], index=2)
 ema_span = st.sidebar.slider("EMA smoothing of bear prob (ema_span)", 5, 50, 20)
 bear_enter = st.sidebar.slider("Bear enter threshold", 0.50, 0.99, 0.80, 0.01)
@@ -154,44 +131,34 @@ trend_gate = st.sidebar.checkbox("Require price < EMA100 at entry", value=True)
 trend_exit_cross = st.sidebar.checkbox("Exit bear when price crosses above EMA100", value=True)
 bear_profit_exit = st.sidebar.number_input("Bear profit exit (bounce % from entry)", 0.00, 0.30, 0.05, step=0.005, format="%.3f")
 
-# --------------------------------------------------------------------------------------
-# Data + diagnostics
-# --------------------------------------------------------------------------------------
-full_px = fetch_full_history(ticker)
+# ---------------------- Data + header --------------------
+full_px = fetch_full_history_tsla()
 full_px = add_emas(full_px)
-
-# Note: This is truly full history. The next line creates the zoom view only:
 zoom_px = subset_last_years(full_px, zoom_years)
 
 full_years = (full_px.index.max() - full_px.index.min()).days / 365.25
 
 st.title("TSLA Regime Detection — HMM + Human-Readable Rules (Crisp Zoom Charts)")
 st.caption(
-    f"Full-history price with EMAs (IPO→today) and last-N-years regime view. "
+    f"Full-history price with EMAs (IPO→today) and last-{zoom_years}-years regime view. "
     f"Data via Yahoo Finance at runtime.\n\n"
     f"Diagnostic — full-history span: {full_years:,.1f}y; zoom window: {zoom_years}y"
 )
 
-# --------------------------------------------------------------------------------------
-# PLOT 1 — IPO → today (this uses full_px, not zoom_px)
-# --------------------------------------------------------------------------------------
-fig_full = plot_close_ema(full_px, f"{ticker} — Close with EMA20 / EMA100 (IPO → today)")
+# ---------------------- Chart 1: IPO → today --------------
+fig_full = plot_close_ema(full_px, "TSLA — Close with EMA20 / EMA100 (IPO → today)")
 st.plotly_chart(fig_full, use_container_width=True, theme="streamlit")
-download_png_button(fig_full, "Download full-history chart (high resolution)")
+download_png_button(fig_full, "Download full-history chart (high-res)", "tsla_full_history.png")
 
-# --------------------------------------------------------------------------------------
-# PLOT 2 — last N years (zoom)
-# --------------------------------------------------------------------------------------
-fig_zoom = plot_close_ema(zoom_px, f"{ticker} — Close with EMA20 / EMA100 (last {zoom_years} years)")
+# ---------------------- Chart 2: last N years --------------
+fig_zoom = plot_close_ema(zoom_px, f"TSLA — Close with EMA20 / EMA100 (last {zoom_years} years)")
 st.plotly_chart(fig_zoom, use_container_width=True, theme="streamlit")
-download_png_button(fig_zoom, "Download zoom chart (high resolution)")
+download_png_button(fig_zoom, "Download zoom chart (high-res)", "tsla_last_years.png")
 
-# --------------------------------------------------------------------------------------
-# Regimes — last N years ONLY
-# --------------------------------------------------------------------------------------
+# ---------------------- Regimes: last N years only --------
 with st.spinner("Running regime detection…"):
     df_reg, _ = detect_regimes(
-        ticker=ticker,
+        ticker="TSLA",                 # 🔒 fixed ticker (no user change)
         n_components=n_components,
         ema_span=ema_span,
         bear_enter=bear_enter,
@@ -211,14 +178,14 @@ with st.spinner("Running regime detection…"):
         trend_gate=trend_gate,
         trend_exit_cross=trend_exit_cross,
         bear_profit_exit=bear_profit_exit,
-        start="2000-01-01",
-        end="today",
+        start="2000-01-01",           # IPO-ish start
+        end="today",                  # explicit end to avoid None-labels
     )
 
 fig_reg = plot_regimes_last(df_reg, zoom_years,
-                            f"{ticker} — Regimes (last {zoom_years} years; light = candidate bear, dark = confirmed bear)")
+                            f"TSLA — Regimes (last {zoom_years} years; light = candidate bear, dark = confirmed bear)")
 st.plotly_chart(fig_reg, use_container_width=True, theme="streamlit")
-download_png_button(fig_reg, "Download regimes chart (high resolution)")
+download_png_button(fig_reg, "Download regimes chart (high-res)", "tsla_regimes_last_years.png")
 
 # --------------------------------------------------------------------------------------
 # Parameter explainer (plain English)
