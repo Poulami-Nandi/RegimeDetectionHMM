@@ -251,34 +251,38 @@ def download_png(fig, label: str, filename: str, *, width: int = 2200, height: i
 
 st.title("TSLA Regime Detection — HMM + Human-Readable Rules (Crisp Zoom Charts)")
 
-st.sidebar.header("Controls")
-zoom_years = st.sidebar.slider("Zoom window (years)", 1, 10, 3, 1)
+# ======================= SIDEBAR: fixed TSLA + default knobs =======================
+import datetime as _dt
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Regime knobs")
+st.sidebar.markdown("### Controls (fixed to TSLA)")
+ticker = "TSLA"  # <- locked
 
-n_components = st.sidebar.selectbox("HMM states (n_components)", [2, 3, 4], index=2)
-ema_span      = st.sidebar.slider("EMA smoothing of bear prob (ema_span)", 5, 50, 20)
-bear_enter    = st.sidebar.slider("Bear enter threshold", 0.50, 0.99, 0.80, 0.01)
-bear_exit     = st.sidebar.slider("Bear exit threshold", 0.10, 0.90, 0.55, 0.01)
-mom_thr       = st.sidebar.slider("Trend weakness (mom_threshold)", 0.00, 0.10, 0.03, 0.005)
-dd_thr        = st.sidebar.slider("Drawdown confirm (ddown_threshold)", 0.00, 0.40, 0.15, 0.01)
-confirm_d     = st.sidebar.slider("Confirm days", 1, 15, 7, 1)
+st.sidebar.markdown("### Regime knobs (defaults match your Colab)")
+n_components        = st.sidebar.number_input("HMM states (n_components)", 2, 6, value=4, step=1)
+k_forward           = st.sidebar.slider("k_forward (days ahead for label)", 1, 20, value=10, step=1)
+ema_span            = st.sidebar.slider("EMA smoothing of bear prob (ema_span)", 5, 60, value=20, step=1)
+bear_enter          = st.sidebar.slider("Bear enter threshold", 0.50, 0.99, value=0.80, step=0.01)
+bear_exit           = st.sidebar.slider("Bear exit threshold", 0.00, 0.95, value=0.55, step=0.01)
+min_bear_run        = st.sidebar.slider("Min bear run (days)", 1, 60, value=15, step=1)
+min_bull_run        = st.sidebar.slider("Min bull run (days)", 1, 60, value=5, step=1)
+mom_threshold       = st.sidebar.slider("Trend weakness (mom_threshold)", 0.00, 0.10, value=0.03, step=0.001)
+ddown_threshold     = st.sidebar.slider("Drawdown confirm (ddown_threshold)", 0.00, 0.30, value=0.15, step=0.005)
+confirm_days        = st.sidebar.slider("Confirm days (bear)", 0, 20, value=7, step=1)
+bull_mom_threshold  = st.sidebar.slider("Bull trend (bull_mom_threshold)", 0.00, 0.05, value=0.01, step=0.001)
+bull_ddown_exit     = st.sidebar.slider("Bull dd exit (bull_ddown_exit)", 0.00, 0.20, value=0.06, step=0.005)
+confirm_days_bull   = st.sidebar.slider("Confirm days (bull)", 0, 10, value=3, step=1)
+direction_gate      = st.sidebar.checkbox("Directional gate", value=True)
+trend_gate          = st.sidebar.checkbox("Trend gate", value=True)
+strict              = st.sidebar.checkbox("Strict confirmation", value=False)
+entry_ret_lookback  = st.sidebar.slider("Entry return lookback (days)", 1, 30, value=10, step=1)
+entry_ret_thresh    = st.sidebar.slider("Entry return threshold", -0.05, 0.05, value=-0.01, step=0.001)
+entry_ddown_thresh  = st.sidebar.slider("Entry drawdown threshold", -0.10, 0.10, value=-0.03, step=0.001)
+bear_profit_exit    = st.sidebar.slider("Bear profit exit", 0.00, 0.20, value=0.05, step=0.005)
+zoom_years          = st.sidebar.slider("Zoom window (years)", 1, 10, value=3, step=1)
 
-bull_mom      = st.sidebar.slider("Bull trend (bull_mom_threshold)", 0.00, 0.05, 0.01, 0.005)
-bull_dd_ex    = st.sidebar.slider("Bull dd exit (bull_ddown_exit)", 0.00, 0.20, 0.06, 0.01)
-confirm_db    = st.sidebar.slider("Confirm days (bull)", 1, 10, 3, 1)
-
-min_bear_run  = st.sidebar.slider("Min bear run (days)", 1, 30, 15, 1)
-min_bull_run  = st.sidebar.slider("Min bull run (days)", 1, 30, 5, 1)
-
-direction_gate    = st.sidebar.checkbox("Use direction gate", value=True)
-entry_lb          = st.sidebar.number_input("Entry return lookback (days)", 1, 60, 10)
-entry_ret         = st.sidebar.number_input("Entry return thresh (≤ negative)", -0.20, 0.00, -0.01, step=0.005, format="%.3f")
-entry_dd          = st.sidebar.number_input("Entry drawdown thresh (≤ negative)", -0.50, 0.00, -0.03, step=0.005, format="%.3f")
-trend_gate        = st.sidebar.checkbox("Require price < EMA100 at entry", value=True)
-trend_exit_cross  = st.sidebar.checkbox("Exit bear when price crosses above EMA100", value=True)
-bear_profit_exit  = st.sidebar.number_input("Bear profit exit (bounce % from entry)", 0.00, 0.30, 0.05, step=0.005, format="%.3f")
 
 # ===================== Price charts (always render) =====================
 
@@ -311,55 +315,136 @@ download_png(fig2, "Download zoom chart (high-res)", "tsla_last_years.png")
 
 # ===================== Regime plot (runs after price charts) =====================
 
-with st.spinner("Computing regimes (HMM + rules)…"):
-    # IMPORTANT: pass end=None (NOT 'today') so the pipeline doesn’t error
-    df_reg, _ = detect_regimes(
-        ticker="TSLA",
-        n_components=n_components,
-        ema_span=ema_span,
-        bear_enter=bear_enter,
-        bear_exit=bear_exit,
-        mom_threshold=mom_thr,
-        ddown_threshold=dd_thr,
-        confirm_days=confirm_d,
-        bull_mom_threshold=bull_mom,
-        bull_ddown_exit=bull_dd_ex,
-        confirm_days_bull=confirm_db,
-        min_bear_run=min_bear_run,
-        min_bull_run=min_bull_run,
-        direction_gate=direction_gate,
-        entry_ret_lookback=entry_lb,
-        entry_ret_thresh=entry_ret,
-        entry_dd_thresh=entry_dd,
-        trend_gate=trend_gate,
-        trend_exit_cross=trend_exit_cross,
-        bear_profit_exit=bear_profit_exit,
-        start="2010-06-29",
-        end=None,  # <— critical
+# ======================= RUN PIPELINE (TSLA only) =======================
+from src.regime_detection import detect_regimes  # your pipeline
+
+# 🔁 If your function uses different argument names, map them here.
+df, model = detect_regimes(
+    ticker=ticker,
+    start="2000-01-01",
+    end="today",
+    n_components=n_components,
+    k_forward=k_forward,
+    ema_span=ema_span,
+    prob_threshold=bear_enter,       # enter threshold
+    prob_exit=bear_exit,             # exit threshold
+    min_run=min_bear_run,            # if you separate bull/bear mins, pass accordingly
+    min_bull_run=min_bull_run,
+    mom_threshold=mom_threshold,
+    ddown_threshold=ddown_threshold,
+    confirm_days=confirm_days,
+    bull_mom_threshold=bull_mom_threshold,
+    bull_ddown_exit=bull_ddown_exit,
+    confirm_days_bull=confirm_days_bull,
+    direction_gate=direction_gate,
+    entry_ret_lookback=entry_ret_lookback,
+    entry_ret_thresh=entry_ret_thresh,
+    entry_ddown_thresh=entry_ddown_thresh,
+    trend_gate=trend_gate,
+    bear_profit_exit=bear_profit_exit,
+    strict=strict,
+)
+
+# df is assumed to have columns: 'Close', optional 'ema20'/'ema100',
+# 'bear_candidate' (bool/int), 'bear_confirm' (bool/int).
+# If your function keeps EMAs separate, we compute them here on the fly:
+if "ema20" not in df.columns:
+    df["ema20"] = df["Close"].ewm(span=20, adjust=False).mean()
+if "ema100" not in df.columns:
+    df["ema100"] = df["Close"].ewm(span=100, adjust=False).mean()
+
+# Last N years slice
+cutoff = df.index.max() - pd.DateOffset(years=zoom_years)
+px_zoom = df.loc[df.index >= cutoff].copy()
+
+# ======================= PLOTLY: TSLA regimes (last 3y) =======================
+def _segments(index, mask_bool):
+    """Return [(start_ts, end_ts), ...] of contiguous True runs."""
+    out, start = [], None
+    for i in range(len(index)):
+        m = bool(mask_bool[i])
+        if m and start is None:
+            start = index[i]
+        elif (not m) and (start is not None):
+            out.append((start, index[i - 1]))
+            start = None
+    if start is not None:
+        out.append((start, index[-1]))
+    return out
+
+def _add_bear_shading(fig, index, mask_bool, y0, y1, opacity):
+    for s, e in _segments(index, mask_bool):
+        fig.add_shape(
+            type="rect", x0=s, x1=e, y0=y0, y1=y1,
+            fillcolor="crimson", opacity=opacity, line=dict(width=0),
+            layer="below"
+        )
+
+# Build candidate-only & confirmed masks (aligned to px_zoom)
+bear_cand = px_zoom.get("bear_candidate", pd.Series(False, index=px_zoom.index)).astype(bool)
+bear_conf = px_zoom.get("bear_confirm",   pd.Series(False, index=px_zoom.index)).astype(bool)
+cand_only = bear_cand & (~bear_conf)
+
+ymin = float(px_zoom["Close"].min()) * 0.95
+ymax = float(px_zoom["Close"].max()) * 1.05
+
+fig_reg = go.Figure()
+fig_reg.add_trace(go.Scatter(
+    x=px_zoom.index, y=px_zoom["Close"], name="Close",
+    mode="lines", line=dict(width=2.0, color="#111")
+))
+fig_reg.add_trace(go.Scatter(
+    x=px_zoom.index, y=px_zoom["ema20"], name="EMA20",
+    mode="lines", line=dict(width=1.7, color="#ff7f0e")
+))
+fig_reg.add_trace(go.Scatter(
+    x=px_zoom.index, y=px_zoom["ema100"], name="EMA100",
+    mode="lines", line=dict(width=1.7, color="#2ca02c")
+))
+
+# Light red: candidate-only; Dark red: confirmed
+_add_bear_shading(fig_reg, px_zoom.index, cand_only.values, ymin, ymax, opacity=0.12)
+_add_bear_shading(fig_reg, px_zoom.index, bear_conf.values, ymin, ymax, opacity=0.30)
+
+# Title string mirrors your Colab chart
+params_str = (
+    f"k_fwd={k_forward}, EMA={ema_span}, enter={bear_enter:.2f}, exit={bear_exit:.2f}, "
+    f"min_bear={min_bear_run}, min_bull={min_bull_run}, mom_thr={mom_threshold:.2f}, "
+    f"dd_thr={ddown_threshold:.2f}, bull_mom_thr={bull_mom_threshold:.2f}, "
+    f"bull_dd_exit={bull_ddown_exit:.2f}, confirm_bear={confirm_days}, "
+    f"confirm_bull={confirm_days_bull}, dir_gate={direction_gate}, lbk={entry_ret_lookback}, "
+    f"entry_ret_thr={entry_ret_thresh:.2f}, entry_dd_thr={entry_ddown_thresh:.2f}, "
+    f"trend_gate={trend_gate}, profit_exit={bear_profit_exit:.2f}, strict={strict}"
+)
+
+fig_reg.update_layout(
+    title=dict(text=f"TSLA — Regimes (last {zoom_years} years; light=candidate, dark=confirmed)<br>"
+                    f"<sup>{params_str}</sup>",
+               pad=dict(b=26)),
+    template="plotly_white",
+    height=520,
+    margin=dict(l=10, r=10, t=90, b=10),
+    legend=dict(
+        orientation="h", x=0, xanchor="left", y=1.02, yanchor="bottom",
+        bgcolor="rgba(255,255,255,0.85)"
+    ),
+    xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)", rangeslider=dict(visible=False)),
+    yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)", range=[ymin, ymax]),
+    hovermode="x unified",
+)
+
+st.plotly_chart(fig_reg, use_container_width=True, theme="streamlit")
+
+# Optional PNG download (uses kaleido if present on the host)
+try:
+    st.download_button(
+        "Download regimes chart (high-res PNG)",
+        data=fig_reg.to_image(format="png", scale=3),  # scale>1 => higher DPI
+        file_name=f"{ticker}_regimes_last{zoom_years}y.png",
+        mime="image/png",
     )
-
-# Regime chart = last N years only
-fig3 = plot_close_emas(px_zoom, f"TSLA — Regimes (last {zoom_years} years; light=candidate, dark=confirmed)", h=480)
-# NEW shading: candidate-only (candidate AND NOT confirmed), then confirmed on top
-if {"bear_candidate", "bear_confirm"}.issubset(df_reg.columns):
-    cand_only = df_reg["bear_candidate"].astype(bool) & (~df_reg["bear_confirm"].astype(bool))
-    # align strictly to the zoom index
-    cand_only = cand_only.reindex(px_zoom.index, fill_value=False)
-
-    df_tmp = df_reg.reindex(px_zoom.index).copy()
-    df_tmp["_cand_only"] = cand_only
-
-    add_bear_shading(fig3, df_tmp, px_zoom, "_cand_only", opacity=0.12)  # light red
-    add_bear_shading(fig3, df_reg, px_zoom, "bear_confirm", opacity=0.30)  # dark red
-else:
-    if "bear_candidate" in df_reg.columns:
-        add_bear_shading(fig3, df_reg, px_zoom, "bear_candidate", opacity=0.12)
-    if "bear_confirm" in df_reg.columns:
-        add_bear_shading(fig3, df_reg, px_zoom, "bear_confirm", opacity=0.30)
-
-st.plotly_chart(fig3, use_container_width=True, theme="streamlit")
-download_png(fig3, "Download regimes chart (high-res)", "tsla_regimes_last_years.png")
-
+except Exception:
+    st.info("PNG export needs `kaleido`. Use the chart camera icon if PNG download is unavailable.")
 
 # --------------------------------------------------------------------------------------
 # Parameter explainer (plain English)
