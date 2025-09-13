@@ -255,7 +255,7 @@ This page is read-only: it **does not change** the underlying detection code or 
 # ===================== Parameter explainer (bottom of page) =====================
 with st.container():
     st.markdown("---")
-    st.subheader("Parameter explainer (plain English, with TSLA examples)")
+    st.subheader("Parameter explainer")
 
     st.markdown("""
 **How to read this:** each knob says *what it does*, *when to nudge it up/down*, and a **TSLA-flavored example** so it’s easy to picture.
