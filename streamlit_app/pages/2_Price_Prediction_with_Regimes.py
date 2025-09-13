@@ -251,3 +251,86 @@ We then add a **regime bias** that scales with recent volatility (σ):
 This page is read-only: it **does not change** the underlying detection code or Home page.
         """
     )
+
+# ===================== Parameter explainer (bottom of page) =====================
+with st.container():
+    st.markdown("---")
+    st.subheader("Parameter explainer (plain English, with TSLA examples)")
+
+    st.markdown("""
+**How to read this:** each knob says *what it does*, *when to nudge it up/down*, and a **TSLA-flavored example** so it’s easy to picture.
+
+### General (view)
+- **Zoom window (years)** – how many years you see in the plots.  
+  *Nudge:* Increase to show more history; decrease to zoom in on recent behavior.  
+  *TSLA tip:* 3y shows recent cycles without losing context.
+
+### HMM / Regime labeling (shared with the main app)
+- **HMM states (`n_components`)** – how many hidden market “modes” the HMM learns (e.g., calm-bull, high-vol bull, drawdown-bear).  
+  *Nudge:* Raise if one state mixes very different behavior; lower if two states look redundant.  
+  *TSLA tip:* 3–4 often separates “fast rising but noisy” from “true damage”.
+
+- **`k_forward` (days)** – a look-ahead used only while training to name states from future returns.  
+  *Nudge:* Larger = smoother, slower labels; smaller = faster, noisier labels.  
+  *TSLA tip:* 7–10 captures turns without over-reacting to one-day spikes.
+
+- **`ema_span` (days)** – smoothing applied to the bear-probability line before thresholds.  
+  *Nudge:* Raise to reduce whipsaws; lower to react faster.  
+  *TSLA tip:* ~20 keeps noise out but still catches regime changes within weeks.
+
+- **Bear enter / exit (`bear_enter`, `bear_exit`)** – probabilities that gate when a **bear candidate** starts and when a bear ends.  
+  *Nudge:* If you see too many false bears, raise **enter** or lower **exit**; if bears start too late, lower **enter** a touch.  
+  *TSLA tip:* 0.80 enter with 0.55 exit gives healthy hysteresis.
+
+- **Trend weakness (`mom_threshold`)** – requires **EMA20 below EMA100** by at least this fraction to *confirm* a bear.  
+  *Nudge:* Raise to demand a clearer down-trend; lower if bears aren’t confirming when they should.  
+  *Example:* 0.03 ≈ 3% gap (EMA20 under EMA100).
+
+- **Drawdown confirm (`ddown_threshold`)** – price must be this far under a recent peak to *confirm* a bear.  
+  *Nudge:* Raise to avoid shallow dips being called bear; lower to catch pullbacks earlier.  
+  *TSLA tip:* 0.15 (~15%) filters routine wobbles.
+
+- **Confirm days (bear) (`confirm_days`)** – how long weakness must persist to confirm bear.  
+  *Nudge:* Raise to avoid whipsaws; lower to react sooner.  
+  *TSLA tip:* ~7 days.
+
+- **Min run lengths (`min_bear_run`, `min_bull_run`)** – drop tiny islands shorter than these durations.  
+  *Nudge:* Raise to tidy labels; lower to show more micro-pockets.
+
+- **Bull confirmations (`bull_mom_threshold`, `confirm_days_bull`)** – ask for **EMA20 above EMA100** by this fraction and for at least N days before recognizing a bull pocket.  
+  *TSLA tip:* 0.01 and 2–3 days catch relief rallies without over-labeling.
+
+- **Bull drawdown exit (`bull_ddown_exit`)** – if the drawdown has healed to within this distance of the peak, exit bear even if probability lags.  
+  *Nudge:* Raise to exit bears earlier after strong recoveries.
+
+- **Gates at entry/exit**
+  - **`direction_gate`** – require weak recent returns **and** a real drawdown to *start* a bear (e.g., last 10-day return ≤ −1% and drawdown ≤ −3%).  
+  - **`trend_gate`** – only enter bear if price is already **below EMA100**.  
+  - **`trend_exit_cross`** (if present) – if price crosses **above EMA100** while in bear, exit.
+
+- **Entry filters** (if shown)
+  - **`entry_ret_lookback` / `entry_ret_thresh`** – recent return window and threshold to allow a bear entry (e.g., 10 days, −1%).  
+  - **`entry_ddown_thresh`** – minimum drawdown needed to allow bear entry.  
+  - **`bear_profit_exit`** – if price bounces X% from bear entry, force an early bear exit.
+
+### Bias layer (new on this page, for the regime-aware forecast)
+- **Volatility span (`vol_span`)** – EMA window used for a simple vol proxy. Higher span = smoother vol estimate.  
+  *Why it matters:* We dampen or amplify the forecast using both *regime* and *vol*.  
+
+- **Bias strength in bull (`bull_k`)** – how much to **tilt the base forecast up** during bull regimes.  
+  *Nudge:* Raise if bull periods under-predict; lower if they overshoot.  
+  *TSLA tip:* Start small (e.g., 0.15) and increase if your base model is conservative.
+
+- **Bias strength in confirmed bear (`bear_k_conf`)** – how much to **tilt the base forecast down** during confirmed bear.  
+  *Nudge:* Raise if confirmed bears still look too optimistic; lower if too pessimistic.
+
+- **Bias strength in candidate bear (`bear_k_cand`)** – gentler tilt while the bear is *only a candidate*.  
+  *Nudge:* Keep lower than `bear_k_conf` so candidates don’t dominate; lift slightly if candidates often turn into real bears.
+
+### What to tweak for different personalities
+- **Very volatile (TSLA-like):** keep `ema_span` ~20, `bear_enter` high (≈0.80), `bear_exit` well lower (≈0.55), require `mom_threshold` ≈3% and `ddown_threshold` ≈15%, `confirm_days` ~7, enable `direction_gate`. Use modest `bull_k`, stronger `bear_k_conf`, small `bear_k_cand`.  
+- **Steadier mega-caps:** relax confirms a bit (e.g., `mom_threshold` 1–2%, `ddown_threshold` 8–10%), fewer confirm days (~3–5), smaller min runs.  
+- **Choppy sideways:** lower `bear_enter`/raise `bear_exit` gap slightly and increase min runs to avoid label flip-flop; reduce bias strengths so forecast stays close to the base model.
+
+**Rule of thumb:** If you see too many false bears → raise `bear_enter`, `mom_threshold`, `ddown_threshold`, `confirm_days`; keep `direction_gate` on. If bears exit too late → lower `bear_exit` a bit, raise `bull_ddown_exit`, or turn on `trend_exit_cross`.
+""")
