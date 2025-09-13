@@ -125,9 +125,15 @@ reg_zoom = df_reg.reindex(px_zoom.index)
 # --------- Build base forecast + regime bias ----------
 base = base_forecast_close(px_zoom["Close"].squeeze(), horizon=5)
 final, bias = apply_regime_bias(
-    base=base, close=px_zoom["Close"], regime_df=reg_zoom,
-    vol_span=vol_span, bull_k=bull_k, bear_k_conf=bear_k_conf, bear_k_cand=bear_k_cand,
+    base=base.squeeze(),
+    close=px_zoom["Close"].squeeze(),
+    regime_df=reg_zoom,
+    vol_span=vol_span,
+    bull_k=bull_k,
+    bear_k_conf=bear_k_conf,
+    bear_k_cand=bear_k_cand,
 )
+
 
 # --------- Plot: regimes + forecasts ----------
 def _segments(index, mask):
