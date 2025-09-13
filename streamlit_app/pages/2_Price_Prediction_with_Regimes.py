@@ -13,6 +13,10 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from statsmodels.tsa.arima.model import ARIMA
+import pandas as pd
+import yfinance as yf
+
 
 def _clean_series(s: pd.Series) -> pd.Series:
     """Coerce to float, drop NaNs."""
@@ -73,6 +77,10 @@ bull_k       = st.sidebar.slider("bull_k (×σ)", -1.0, 2.0, 0.60, 0.05)
 bear_k_conf  = st.sidebar.slider("bear_k_conf (×σ)", -2.0, 0.0, -0.60, 0.05)
 bear_k_cand  = st.sidebar.slider("bear_k_cand (×σ)", -2.0, 0.0, -0.30, 0.05)
 
+with st.sidebar.expander("ARIMA baseline (advanced)"):
+    p = st.number_input("ARIMA p", 0, 5, value=1, step=1)
+    d = st.number_input("ARIMA d", 0, 2, value=1, step=1)
+    q = st.number_input("ARIMA q", 0, 5, value=1, step=1)
 # --------- Data fetch (direct full history for the forecast chart) ----------
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_tsla():
@@ -84,6 +92,50 @@ def get_tsla():
 px = get_tsla()
 cutoff = px.index.max() - pd.DateOffset(years=zoom_years)
 px_zoom = px.loc[px.index >= cutoff].copy()
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_ohlcv_last_years(ticker: str = "TSLA", years: int = 3) -> pd.DataFrame:
+    """
+    Robust OHLCV fetch for the last `years` of daily data.
+    Uses auto-adjusted prices (div/splits).
+    """
+    df = yf.download(ticker, period=f"{years}y", interval="1d",
+                     auto_adjust=True, progress=False)
+    if df.empty:
+        return df
+    if getattr(df.index, "tz", None) is not None:
+        df.index = df.index.tz_localize(None)
+    cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+    return df[cols].dropna()
+
+def base_forecast_close_arima(ohlcv: pd.DataFrame, order=(1, 1, 1)) -> pd.Series:
+    """
+    One-step-ahead ARIMA baseline for the *historical* Close series.
+    Returns a Series aligned to ohlcv.index named 'base_forecast'.
+
+    We use in-sample one-step predictions (dynamic=False) to create
+    a same-length baseline that can be bias-adjusted per regime.
+    """
+    if ohlcv is None or ohlcv.empty or "Close" not in ohlcv:
+        return pd.Series(dtype=float, name="base_forecast")
+
+    close = ohlcv["Close"].astype(float)
+    if len(close) < 50:
+        # too short for ARIMA — just mirror Close so downstream doesn’t break
+        return close.rename("base_forecast")
+
+    try:
+        model = ARIMA(close, order=order)
+        res = model.fit()
+        # one-step-ahead fitted values for the full span
+        pred = res.get_prediction(start=close.index[1], end=close.index[-1], dynamic=False)
+        base = pred.predicted_mean.reindex(close.index)
+        # fill the first element for nicer alignment
+        base.iloc[0] = close.iloc[0]
+        return base.rename("base_forecast")
+    except Exception as e:
+        st.warning(f"ARIMA baseline failed ({e}). Falling back to a simple EMA(10).")
+        return close.ewm(span=10, adjust=False).mean().rename("base_forecast")
 
 # --------- Call your existing pipeline (unchanged) ----------
 def _call_detect_regimes(func, **vals):
@@ -147,22 +199,24 @@ if close.empty:
     st.error("No TSLA close data available in the zoom window. Try rerunning.")
     st.stop()
 
-# --- base 'naive' forecast (your function) ---
-base = base_forecast_close(close, horizon=5)
-base = _clean_series(base)
+# --- Build ARIMA baseline from last-N-years OHLCV ---
+ohlcv = fetch_ohlcv_last_years("TSLA", years=zoom_years)
+base  = base_forecast_close_arima(ohlcv, order=(p, d, q))
 
-# align base to close
-close, base = _align_like(close, base)
+# Align everything to a common index (prevents empty plots)
+common_idx = px_zoom.index.intersection(base.index)
+if "bear_candidate" in reg_zoom.columns or "bear_confirm" in reg_zoom.columns:
+    reg_zoom = reg_zoom.reindex(common_idx)
 
-# --- regime-aware final forecast ---
+px_zoom  = px_zoom.reindex(common_idx)
+base     = base.reindex(common_idx)
+close_al = px_zoom["Close"].astype(float)
+
+# pass the aligned close + base into your bias layer function
 final, bias = apply_regime_bias(
-    base=base,
-    close=close,
-    regime_df=reg_zoom,           # your last-3y regime flags
-    vol_span=vol_span,
-    bull_k=bull_k,
-    bear_k_conf=bear_k_conf,
-    bear_k_cand=bear_k_cand,
+    base=base, close=close_al, regime_df=reg_zoom,
+    vol_span=vol_span, bull_k=bull_k,
+    bear_k_conf=bear_k_conf, bear_k_cand=bear_k_cand,
 )
 
 final = _clean_series(final)
