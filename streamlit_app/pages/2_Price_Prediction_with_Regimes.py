@@ -210,6 +210,7 @@ bear_conf = reg_zoom.get("bear_confirm",   pd.Series(False, index=px_zoom.index)
 ymin = float(px_zoom["Close"].min())*0.95
 ymax = float(px_zoom["Close"].max())*1.05
 
+# --- Plot (use cleaned & aligned series: close, base, final) ---
 fig = go.Figure()
 fig.add_trace(go.Scatter(
     x=close.index, y=close.values, name="Close",
@@ -220,11 +221,13 @@ fig.add_trace(go.Scatter(
     x=base.index, y=base.values, name="Base forecast",
     mode="lines", line=dict(width=2.0, dash="dash", color="#d62728")
 ))
-fig.add_trace(go.ScatteR(
+fig.add_trace(go.Scatter(          # <-- was go.ScatteR (typo)
     x=final.index, y=final.values, name="Regime-aware forecast",
     mode="lines", line=dict(width=2.4, color="#1f77b4")
 ))
+
 fig.update_layout(
+    title="TSLA — Regime-aware forecast (last 3y; light=candidate, dark=confirmed)",
     template="plotly_white",
     height=520,
     margin=dict(l=10, r=10, t=80, b=10),
@@ -232,6 +235,7 @@ fig.update_layout(
     hovermode="x unified",
 )
 st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+
 
 
 with st.expander("What’s happening here?", expanded=False):
