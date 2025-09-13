@@ -44,28 +44,67 @@ def base_forecast_close(close: pd.Series, horizon: int = 5) -> pd.Series:
     return out
 
 
+# addons/regime_bias.py  — replace ONLY this function
+
+import numpy as np
+import pandas as pd
+
 def apply_regime_bias(
     base: pd.Series,
     close: pd.Series,
     regime_df: pd.DataFrame,
+    *,
     vol_span: int = 20,
-    bull_k: float = +0.60,
-    bear_k_conf: float = -0.60,
-    bear_k_cand: float = -0.30,
-) -> pd.Series:
+    bull_k: float = 0.60,
+    bear_k_conf: float = 0.80,
+    bear_k_cand: float = 0.30,
+):
     """
-    Combine base forecast with regime-aware bias proportional to recent vol.
-    Bias is zero outside bear flags (treated as bull/sideways).
+    Combine a base forecast with a regime bias. All inputs are coerced to 1-D Series,
+    indices are aligned, and boolean masks are reindexed (no broadcasting errors).
+
+    Returns
+    -------
+    final : pd.Series  # same index as `base`
+    bias  : pd.Series  # multiplicative bias applied, per timestamp (e.g., +0.60, -0.80, ...)
     """
-    sigma = rolling_vol(close, span=vol_span).reindex(base.index).fillna(0.0)
+    # --- normalize to Series ---
+    if isinstance(base, pd.DataFrame):
+        base = base.iloc[:, 0]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    base = pd.Series(base, index=base.index).astype(float)
+    close = pd.Series(close, index=close.index).astype(float)
+    base.name = base.name or "base_forecast"
+    close.name = close.name or "Close"
 
-    lbl = regime_df.reindex(base.index).apply(regime_label, axis=1)
-    bias = pd.Series(0.0, index=base.index, name="bias")
+    # --- build a master index and align everything to it ---
+    idx = base.index
+    # Regime booleans (default False) aligned to base index
+    cand = regime_df.get("bear_candidate", pd.Series(False, index=regime_df.index))
+    conf = regime_df.get("bear_confirm",   pd.Series(False, index=regime_df.index))
+    cand = pd.Series(cand, index=cand.index).astype(bool).reindex(idx, fill_value=False)
+    conf = pd.Series(conf, index=conf.index).astype(bool).reindex(idx, fill_value=False)
 
-    bias[lbl == "bear_confirm"]   = bear_k_conf * sigma[lbl == "bear_confirm"]
-    bias[lbl == "bear_candidate"] = bear_k_cand * sigma[lbl == "bear_candidate"]
-    bias[lbl == "bull_or_sideways"] = bull_k * sigma[lbl == "bull_or_sideways"]
+    # bull = not in any bear state
+    bull = (~cand) & (~conf)
 
-    final = base * (1 + bias)
+    # --- optional: volatility if you want to scale later (kept here for future use) ---
+    # vol = close.pct_change().ewm(span=vol_span, adjust=False).std().reindex(idx)
+    # (currently unused in the bias calculation to keep it simple/deterministic)
+
+    # --- construct a bias series aligned to base index ---
+    bias = pd.Series(0.0, index=idx)
+
+    # Assign piece-wise (scalar per mask) – no sequence-to-scalar errors
+    bias.loc[bull] =  +float(bull_k)
+    bias.loc[cand] =  -float(bear_k_cand)
+    bias.loc[conf] =  -float(bear_k_conf)
+
+    # --- produce final forecast ---
+    final = base * (1.0 + bias)
     final.name = "final_forecast"
-    return final, bias.rename("regime_bias")
+    bias.name = "regime_bias"
+
+    return final, bias
+
