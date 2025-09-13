@@ -9,6 +9,24 @@ import streamlit as st
 import yfinance as yf
 import inspect
 
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+def _clean_series(s: pd.Series) -> pd.Series:
+    """Coerce to float, drop NaNs."""
+    if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
+    s = pd.to_numeric(s, errors="coerce")
+    return s.astype(float).dropna()
+
+def _align_like(a: pd.Series, b: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """Reindex b to a's index; drop all-NaN rows consistently."""
+    b2 = b.reindex(a.index)
+    mask = ~(a.isna() | b2.isna())
+    return a[mask], b2[mask]
+
 # Make repo root importable (no edits to existing code)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -122,6 +140,47 @@ with st.spinner("Detecting regimes (unchanged pipeline)…"):
 # Align to zoom window
 reg_zoom = df_reg.reindex(px_zoom.index)
 
+# --- close series (last N years) ---
+close = _clean_series(px_zoom["Close"])
+
+if close.empty:
+    st.error("No TSLA close data available in the zoom window. Try rerunning.")
+    st.stop()
+
+# --- base 'naive' forecast (your function) ---
+base = base_forecast_close(close, horizon=5)
+base = _clean_series(base)
+
+# align base to close
+close, base = _align_like(close, base)
+
+# --- regime-aware final forecast ---
+final, bias = apply_regime_bias(
+    base=base,
+    close=close,
+    regime_df=reg_zoom,           # your last-3y regime flags
+    vol_span=vol_span,
+    bull_k=bull_k,
+    bear_k_conf=bear_k_conf,
+    bear_k_cand=bear_k_cand,
+)
+
+final = _clean_series(final)
+# align final as well (so all three share same non-NaN timeline)
+close, base = _align_like(close, base)
+close, final = _align_like(close, final)
+
+# guardrails so the chart never draws “nothing”
+if min(len(close), len(base), len(final)) < 5:
+    st.warning("Not enough aligned points to plot (data became empty after cleaning/alignment).")
+    st.write(
+        "Debug sizes — close:", len(close),
+        "base:", len(base),
+        "final:", len(final)
+    )
+    st.stop()
+
+
 # --------- Build base forecast + regime bias ----------
 base = base_forecast_close(px_zoom["Close"].squeeze(), horizon=5)
 final, bias = apply_regime_bias(
@@ -152,22 +211,28 @@ ymin = float(px_zoom["Close"].min())*0.95
 ymax = float(px_zoom["Close"].max())*1.05
 
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["Close"], name="Close", line=dict(width=2, color="#111")))
-fig.add_trace(go.Scatter(x=base.index,    y=base,             name="Base forecast", line=dict(width=1.8, dash="dot")))
-fig.add_trace(go.Scatter(x=final.index,   y=final,            name="Regime-aware forecast", line=dict(width=2.2, color="#2a6f97")))
-for s,e in _segments(px_zoom.index, bear_cand & (~bear_conf)):
-    fig.add_vrect(x0=s, x1=e, y0=ymin, y1=ymax, fillcolor="crimson", opacity=0.12, line_width=0, layer="below")
-for s,e in _segments(px_zoom.index, bear_conf):
-    fig.add_vrect(x0=s, x1=e, y0=ymin, y1=ymax, fillcolor="crimson", opacity=0.30, line_width=0, layer="below")
-
+fig.add_trace(go.Scatter(
+    x=close.index, y=close.values, name="Close",
+    mode="lines+markers", line=dict(width=1.8, color="#111"),
+    marker=dict(size=3)
+))
+fig.add_trace(go.Scatter(
+    x=base.index, y=base.values, name="Base forecast",
+    mode="lines", line=dict(width=2.0, dash="dash", color="#d62728")
+))
+fig.add_trace(go.ScatteR(
+    x=final.index, y=final.values, name="Regime-aware forecast",
+    mode="lines", line=dict(width=2.4, color="#1f77b4")
+))
 fig.update_layout(
-    title=f"TSLA — Regime-aware forecast (last {zoom_years}y; light=candidate, dark=confirmed)",
-    template="plotly_white", height=650, margin=dict(l=10,r=10,t=60,b=10),
-    legend=dict(orientation="h", x=0, y=1.03, bgcolor="rgba(255,255,255,0.85)"),
-    xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
-    yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)", range=[ymin,ymax])
+    template="plotly_white",
+    height=520,
+    margin=dict(l=10, r=10, t=80, b=10),
+    legend=dict(orientation="h", x=0, y=1.02, xanchor="left", yanchor="bottom"),
+    hovermode="x unified",
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+
 
 with st.expander("What’s happening here?", expanded=False):
     st.markdown(
