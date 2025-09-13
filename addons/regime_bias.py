@@ -19,14 +19,30 @@ def rolling_vol(p: pd.Series, span: int = 20) -> pd.Series:
 def base_forecast_close(close: pd.Series, horizon: int = 5) -> pd.Series:
     """
     Very light, dependency-free baseline: EMA of returns → drift projection.
-    This is only for demo; you can swap for ARIMA/XGBoost later.
+    Robust to DataFrame/Series inputs and keeps a clean Series output.
     """
+    # --- normalize to 1-D Series ---
+    if isinstance(close, pd.DataFrame):
+        # take the first column if a frame was passed
+        close = close.iloc[:, 0]
+    close = pd.Series(close, index=close.index)  # ensure Series
+    close.name = close.name or "Close"
+
+    if horizon < 1:
+        horizon = 1
+
+    # drift from exponentially-weighted mean of returns
     ret = close.pct_change()
     drift = ret.ewm(span=20, adjust=False).mean()
-    # project forward in simple compounded way
-    f = (1 + drift).rolling(horizon).apply(np.prod, raw=True) - 1
-    f = f.shift(1)  # next step forecast
-    return (close * (1 + f)).rename("base_forecast")
+
+    # compounded projection over the next N days (shifted so it's a next-step forecast)
+    comp = (1.0 + drift).rolling(horizon).apply(np.prod, raw=True) - 1.0
+    comp = comp.shift(1)
+
+    out = close * (1.0 + comp)
+    out.name = "base_forecast"  # <-- avoid DataFrame.rename path
+    return out
+
 
 def apply_regime_bias(
     base: pd.Series,
