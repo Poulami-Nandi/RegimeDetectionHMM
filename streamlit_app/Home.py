@@ -219,15 +219,20 @@ def _segments(index, mask_bool):
 def _add_vbands(fig, idx, mask_bool, color, opacity):
     """
     Add vertical shaded bands for True runs in `mask_bool`.
-    IMPORTANT: use yref='paper' so bands span the full plot height
-    and never get clipped by y-axis autoscaling/range updates.
+    Use add_shape + yref='paper' so the bands span the full plot height
+    and never get clipped by y-axis range.
     """
     for s, e in _segments(idx, mask_bool):
-        fig.add_vrect(
+        fig.add_shape(
+            type="rect",
             x0=s, x1=e,
-            y0=0, y1=1, yref="paper",
-            fillcolor=color, opacity=opacity,
-            line_width=0, layer="below"
+            xref="x",
+            y0=0, y1=1,
+            yref="paper",
+            fillcolor=color,
+            opacity=opacity,
+            line=dict(width=0),
+            layer="below",
         )
 
 # ===========================================================================#
@@ -313,7 +318,7 @@ fig_reg.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["ema20"], name="EMA20",
 fig_reg.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["ema100"], name="EMA100",
                              mode="lines", line=dict(width=1.6, color="#2ca02c")))
 
-# Robust shading (yref='paper' spans full chart height)
+# Robust shading (spans full chart height)
 _add_vbands(fig_reg, px_zoom.index, cand_only, "crimson", 0.12)
 _add_vbands(fig_reg, px_zoom.index, bear_conf, "crimson", 0.30)
 
@@ -348,7 +353,6 @@ show_debug = st.sidebar.checkbox("Debug mode (regimes)", value=False)
 if show_debug:
     st.markdown("### Regime debug")
 
-    # Figure out which source we used (no NameError, no hidden vars)
     candidate_source = "pipeline" if bear_cand_raw.any() else "inferred"
     confirm_source   = "pipeline" if bear_conf_raw.any() else "inferred"
 
@@ -373,7 +377,6 @@ if show_debug:
             "confirmed_inferred.sum": int(conf_inf.reindex(px_zoom.index).fillna(False).sum()),
         })
 
-    # Probability plot if available (helps explain why shading might start/stop)
     p_bear = _try_get_prob_series(df) or pd.Series([], dtype=float)
     if not p_bear.empty:
         pz = p_bear.reindex(px_zoom.index)
@@ -388,7 +391,6 @@ if show_debug:
         fig_prob.update_layout(height=260, template="plotly_white", title="Bear probability (raw & EMA)")
         st.plotly_chart(fig_prob, use_container_width=True)
 
-    # Segment table (exactly what should be shaded)
     def _seg_rows(mask: pd.Series, label: str):
         rows = []
         for s, e in _segments(mask.index, mask.values):
