@@ -522,25 +522,6 @@ def _add_band(fig, index, mask_bool, color, opacity, y0, y1):
             line_width=0, layer="below", y0=y0, y1=y1
         )
 
-def _safe_col(df, name):
-    # Robust getter ⇒ returns strictly-boolean aligned Series (all False if missing)
-    s = df.get(name, pd.Series(False, index=df.index))
-    s = pd.Series(s, index=df.index).fillna(False).astype(bool)
-    return s
-
-# build masks aligned to px_zoom (last 3y)
-#bull_cand = _safe_col(px_zoom, "bull_candidate")
-#bull_conf = _safe_col(px_zoom, "bull_confirm")
-#bear_cand = _safe_col(px_zoom, "bear_candidate")
-#bear_conf = _safe_col(px_zoom, "bear_confirm")
-
-bull_cand = reg_zoom.get("bull_candidate", pd.Series(False, index=px_zoom.index)).astype(bool)
-bull_conf = reg_zoom.get("bull_confirm",   pd.Series(False, index=px_zoom.index)).astype(bool)
-bear_cand = reg_zoom.get("bear_candidate", pd.Series(False, index=px_zoom.index)).astype(bool)
-bear_conf = reg_zoom.get("bear_confirm",   pd.Series(False, index=px_zoom.index)).astype(bool)
-
-bull_cand_only = bull_cand & (~bull_conf)
-bear_cand_only = bear_cand & (~bear_conf)
 
 # -------- Save confirmed segments (last 3y) to CSV for page 2 ----------
 def _pick(val_series, ts, default=np.nan):
