@@ -9,7 +9,7 @@ from __future__ import annotations
 # ║    2) Last N years Close + EMA20/EMA100                                 ║
 # ║    3) Last N years "Regime" view with bear candidate/confirm shading    ║
 # ║                                                                          ║
-# ║  Robust to minor API changes in `detect_regimes` via a flexible adapter. ║
+# ║  Robust to minor API changes in `detect_regimes` via a flexible adapter.║
 # ║  If the pipeline doesn’t provide masks, we infer them sensibly.          ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
@@ -345,6 +345,72 @@ fig_reg.update_layout(
 )
 st.plotly_chart(fig_reg, use_container_width=True, theme="streamlit")
 
+# === Confirmed-bear segments table (with start/end Close + copy/export) ===
+st.markdown("### Confirmed bear segments (zoom window)")
+
+def _segments_list(index, mask_bool):
+    """Yield (start, end) pairs for contiguous True runs."""
+    out, start = [], None
+    arr = mask_bool.values if hasattr(mask_bool, "values") else mask_bool
+    for i, v in enumerate(arr):
+        v = bool(v)
+        if v and start is None:
+            start = index[i]
+        elif (not v) and (start is not None):
+            out.append((start, index[i-1])); start = None
+    if start is not None:
+        out.append((start, index[-1]))
+    return out
+
+def _safe_pick(series: pd.Series, ts, default=float("nan")):
+    try:
+        return float(series.loc[ts])
+    except Exception:
+        return default
+
+rows = []
+for s, e in _segments_list(px_zoom.index, bear_conf):
+    s_close = _safe_pick(px_zoom["Close"], s)
+    e_close = _safe_pick(px_zoom["Close"], e)
+    days = (e - s).days + 1
+    ret = (e_close / s_close - 1.0) if (s_close and e_close) else float("nan")
+    rows.append({
+        "type": "bear_confirm",
+        "start": s,
+        "end": e,
+        "days": days,
+        "start_close": s_close,
+        "end_close": e_close,
+        "return_%": (ret * 100.0) if ret == ret else float("nan"),
+    })
+
+seg_df = pd.DataFrame(
+    rows, columns=["type","start","end","days","start_close","end_close","return_%"]
+)
+
+if seg_df.empty:
+    st.info("No confirmed-bear segments in the zoom window.")
+else:
+    # Interactive table (sortable). Copy via overflow menu.
+    st.dataframe(seg_df, use_container_width=True, hide_index=True)
+
+    # One-click download
+    st.download_button(
+        "Download confirmed-bear segments (CSV)",
+        data=seg_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"tsla_bear_confirm_segments_last{zoom_years}y.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    # Quick copy area (selectable text)
+    st.text_area(
+        "Quick copy (CSV)",
+        seg_df.to_csv(index=False),
+        height=160,
+        help="Select and copy. Same content as the download.",
+    )
+
 # ===========================================================================#
 #                               DEBUG PANEL                                  #
 # ===========================================================================#
@@ -392,16 +458,16 @@ if show_debug:
         st.plotly_chart(fig_prob, use_container_width=True)
 
     def _seg_rows(mask: pd.Series, label: str):
-        rows = []
+        rows2 = []
         for s, e in _segments(mask.index, mask.values):
-            rows.append({"type": label, "start": s, "end": e, "days": (e - s).days + 1})
-        return rows
+            rows2.append({"type": label, "start": s, "end": e, "days": (e - s).days + 1})
+        return rows2
 
     seg_rows = _seg_rows(cand_only, "bear_candidate_only") + _seg_rows(bear_conf, "bear_confirm")
-    seg_df = pd.DataFrame(seg_rows)
-    if seg_df.empty:
+    seg_df_dbg = pd.DataFrame(seg_rows)
+    if seg_df_dbg.empty:
         st.info("No segments found in the zoom window. If you expect bears, lower `bear_enter`, decrease `ema_span`, or reduce `min_bear_run`.")
     else:
-        st.dataframe(seg_df, use_container_width=True)
+        st.dataframe(seg_df_dbg, use_container_width=True)
 
 st.caption("Author: Dr. Poulami Nandi · Research demo only. Not investment advice.")
