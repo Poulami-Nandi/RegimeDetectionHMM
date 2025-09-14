@@ -478,9 +478,34 @@ def _segments_from_mask(index, mask_bool, min_len=1):
             start = None
     return out
 
-def _add_band(fig, index, mask, color, opacity, y0, y1):
-    for s, e in _segments_from_mask(index, mask):
-        fig.add_vrect(x0=s, x1=e, y0=y0, y1=y1, fillcolor=color, opacity=opacity, line_width=0, layer="below")
+# --- helpers for regime shading (paste above the plotting block) ---
+def _segments(index, mask_bool):
+    """Return [(start, end), ...] for contiguous True runs in mask_bool."""
+    out, start = [], None
+    # allow either a Series/Index-aligned mask or a plain array
+    if hasattr(mask_bool, "values"):
+        mask_iter = mask_bool.values
+    else:
+        mask_iter = mask_bool
+    for i, v in enumerate(mask_iter):
+        v = bool(v)
+        if v and start is None:
+            start = index[i]
+        elif (not v) and (start is not None):
+            out.append((start, index[i-1]))
+            start = None
+    if start is not None:
+        out.append((start, index[-1]))
+    return out
+
+def _add_band(fig, index, mask_bool, color, opacity, y0, y1):
+    """Add background rectangles for True-runs in mask_bool over [y0,y1]."""
+    for s, e in _segments(index, mask_bool):
+        fig.add_vrect(
+            x0=s, x1=e,
+            fillcolor=color, opacity=opacity,
+            line_width=0, layer="below", y0=y0, y1=y1
+        )
 
 def _safe_col(df, name):
     # Robust getter ⇒ returns strictly-boolean aligned Series (all False if missing)
@@ -489,10 +514,18 @@ def _safe_col(df, name):
     return s
 
 # build masks aligned to px_zoom (last 3y)
-bull_cand = _safe_col(px_zoom, "bull_candidate")
-bull_conf = _safe_col(px_zoom, "bull_confirm")
-bear_cand = _safe_col(px_zoom, "bear_candidate")
-bear_conf = _safe_col(px_zoom, "bear_confirm")
+#bull_cand = _safe_col(px_zoom, "bull_candidate")
+#bull_conf = _safe_col(px_zoom, "bull_confirm")
+#bear_cand = _safe_col(px_zoom, "bear_candidate")
+#bear_conf = _safe_col(px_zoom, "bear_confirm")
+
+bull_cand = reg_zoom.get("bull_candidate", pd.Series(False, index=px_zoom.index)).astype(bool)
+bull_conf = reg_zoom.get("bull_confirm",   pd.Series(False, index=px_zoom.index)).astype(bool)
+bear_cand = reg_zoom.get("bear_candidate", pd.Series(False, index=px_zoom.index)).astype(bool)
+bear_conf = reg_zoom.get("bear_confirm",   pd.Series(False, index=px_zoom.index)).astype(bool)
+
+bull_cand_only = bull_cand & (~bull_conf)
+bear_cand_only = bear_cand & (~bear_conf)
 
 # candidate-only versions (so confirmed doesn’t “double shade”)
 bull_cand_only = bull_cand & (~bull_conf)
