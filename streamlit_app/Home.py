@@ -4,16 +4,13 @@ from __future__ import annotations
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  PURPOSE                                                                ║
 # ║  -------                                                                ║
-# ║  This Streamlit page renders three charts for TSLA:                     ║
-# ║    1) IPO→today Close with EMA20/EMA100                                  ║
-# ║    2) Last N years Close with EMA20/EMA100 (zoom view)                   ║
-# ║    3) Last N years "Regime" view with light (candidate) and dark         ║
-# ║       (confirmed) bear shading.                                          ║
+# ║  Streamlit page with three TSLA charts:                                 ║
+# ║    1) IPO→today Close + EMA20/EMA100                                    ║
+# ║    2) Last N years Close + EMA20/EMA100                                 ║
+# ║    3) Last N years "Regime" view with bear candidate/confirm shading    ║
 # ║                                                                          ║
-# ║  The page is resilient to small API differences in your pipeline:        ║
-# ║  it calls `detect_regimes(...)` via a flexible adapter and falls back     ║
-# ║  to inference for bear candidate/confirm masks if the pipeline doesn’t    ║
-# ║  provide them or they’re all False.                                       ║
+# ║  Robust to minor API changes in `detect_regimes` via a flexible adapter. ║
+# ║  If the pipeline doesn’t provide masks, we infer them sensibly.          ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 # ===== stdlib =====
@@ -35,7 +32,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # ────────────────────────────────────────────────────────────────────────────
-# Pipeline import (with friendly failure)
+# Pipeline import (friendly failure)
 # ────────────────────────────────────────────────────────────────────────────
 try:
     from src.regime_detection import detect_regimes
@@ -87,16 +84,14 @@ bear_profit_exit    = st.sidebar.slider("Bear profit exit", 0.00, 0.20, value=0.
 zoom_years          = st.sidebar.slider("Zoom window (years)", 1, 10, value=3, step=1)
 
 # ===========================================================================#
-#                              HELPERS (UI-safe)                             #
+#                              HELPERS                                       #
 # ===========================================================================#
 
 def _call_detect_regimes_flexible(func, **vals):
     """
-    Adapter that maps the page's knob names to whatever the current
-    `detect_regimes` signature expects. Tries several aliases to
-    tolerate minor API changes.
-
-    Returns (df, model).
+    Map the page’s knob names to whatever the current `detect_regimes`
+    signature expects. Returns (df, model) even if the original returns
+    only a DataFrame.
     """
     sig = inspect.signature(func)
     params = set(sig.parameters.keys())
@@ -137,7 +132,7 @@ def _call_detect_regimes_flexible(func, **vals):
 
 
 def _ensure_emas(df: pd.DataFrame) -> pd.DataFrame:
-    """Guarantee ema20/ema100 exist even if pipeline doesn’t return them."""
+    """Make sure ema20/ema100 exist for plotting/confirmation rules."""
     if df is None or df.empty:
         return df
     if "Close" in df:
@@ -149,7 +144,7 @@ def _ensure_emas(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _last_years(df: pd.DataFrame, years: int) -> pd.DataFrame:
-    """Slice to the last `years` of data by index."""
+    """Tail slice to the last `years` using the DateTimeIndex."""
     if df.empty:
         return df
     end = df.index.max()
@@ -158,7 +153,7 @@ def _last_years(df: pd.DataFrame, years: int) -> pd.DataFrame:
 
 
 def _try_get_prob_series(df: pd.DataFrame) -> pd.Series | None:
-    """Find a column that looks like a 'bear probability' series."""
+    """Find a 'bear probability' column by fuzzy name."""
     candidates = [c for c in df.columns if "prob" in c.lower() and "bear" in c.lower()]
     if candidates:
         s = pd.to_numeric(df[candidates[0]], errors="coerce")
@@ -168,16 +163,10 @@ def _try_get_prob_series(df: pd.DataFrame) -> pd.Series | None:
 
 def _infer_bear_masks(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """
-    Build (bear_candidate, bear_confirm) aligned to df.index.
-
-    Candidate:
-      - If pipeline `bear_candidate` exists, use it.
-      - Else, use EMA-smoothed p_bear >= bear_enter if a prob column exists.
-
-    Confirmed:
-      - Candidate & (EMA20 < EMA100 * (1 - mom_threshold)) & (drawdown <= -ddown_threshold)
-
-    Light run-length pruning keeps tiny spikes from plotting.
+    Build (bear_candidate, bear_confirm) when the pipeline doesn’t supply them.
+    Candidate: EMA-smoothed bear probability >= enter.
+    Confirmed: candidate & (ema20 < ema100 by mom_threshold) & (drawdown <= -ddown_threshold).
+    Includes a short run-length filter to avoid single-day flickers.
     """
     idx = df.index
     cand = pd.Series(False, index=idx)
@@ -213,7 +202,7 @@ def _infer_bear_masks(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
 
 
 def _segments(index, mask_bool):
-    """Turn a boolean mask into contiguous (start, end) index tuples."""
+    """Turn a boolean mask into [(start, end), ...] runs."""
     out, start = [], None
     arr = mask_bool.values if hasattr(mask_bool, "values") else mask_bool
     for i, v in enumerate(arr):
@@ -227,12 +216,18 @@ def _segments(index, mask_bool):
     return out
 
 
-def _add_vbands(fig, idx, mask_bool, color, opacity, y0, y1):
-    """Add vertical background rectangles where mask_bool is True."""
+def _add_vbands(fig, idx, mask_bool, color, opacity):
+    """
+    Add vertical shaded bands for True runs in `mask_bool`.
+    IMPORTANT: use yref='paper' so bands span the full plot height
+    and never get clipped by y-axis autoscaling/range updates.
+    """
     for s, e in _segments(idx, mask_bool):
         fig.add_vrect(
-            x0=s, x1=e, fillcolor=color, opacity=opacity,
-            line_width=0, layer="below", y0=y0, y1=y1
+            x0=s, x1=e,
+            y0=0, y1=1, yref="paper",
+            fillcolor=color, opacity=opacity,
+            line_width=0, layer="below"
         )
 
 # ===========================================================================#
@@ -286,75 +281,29 @@ def _plot_close_emas(df_plot: pd.DataFrame, title: str, h=440) -> go.Figure:
     )
     return fig
 
-# 1) Full history (IPO→today)
+# 1) Full history
 fig1 = _plot_close_emas(px_full, "TSLA — Close with EMA20 / EMA100 (IPO → today)")
 st.plotly_chart(fig1, use_container_width=True, theme="streamlit")
 
-# 2) Last-N-years zoom slice
+# 2) Last-N-years zoom
 fig2 = _plot_close_emas(px_zoom, f"TSLA — Close with EMA20 / EMA100 (last {zoom_years} years)")
 st.plotly_chart(fig2, use_container_width=True, theme="streamlit")
 
 # ────────────────────────────────────────────────────────────────────────────
-# 3) Regime view (zoom window) with shading — robust mask selection
+# 3) Regime view (zoom window) with shading
 # ────────────────────────────────────────────────────────────────────────────
 
-# Raw masks from pipeline (may be missing or all-False)
+# Choose masks: prefer pipeline masks only if they contain any True; otherwise infer.
 bear_cand_raw = pd.Series(df.get("bear_candidate", False), index=df.index).astype(bool)
 bear_conf_raw = pd.Series(df.get("bear_confirm",   False), index=df.index).astype(bool)
 
-# Inferred masks from probability + EMA + drawdown rules
-def _infer_bear_masks_plus(df_all: pd.DataFrame):
-    idx = df_all.index
-    # try to locate a bear prob
-    prob_cols = [c for c in df_all.columns if "bear" in c.lower() and "prob" in c.lower()]
-    if prob_cols:
-        p_bear = pd.to_numeric(df_all[prob_cols[0]], errors="coerce").astype(float)
-    elif "p_bear" in df_all.columns:
-        p_bear = pd.to_numeric(df_all["p_bear"], errors="coerce").astype(float)
-    else:
-        p_bear = pd.Series(index=idx, dtype=float)
+cand_inf, conf_inf = _infer_bear_masks(df)
+bear_cand_used = bear_cand_raw if bear_cand_raw.any() else cand_inf
+bear_conf_used = bear_conf_raw if bear_conf_raw.any() else conf_inf
 
-    p_bear_ema = p_bear.ewm(span=ema_span, adjust=False).mean()
-
-    cand = (p_bear_ema >= bear_enter).reindex(idx).fillna(False)
-    ema_ok = (df_all["ema20"] < df_all["ema100"] * (1 - mom_threshold)).reindex(idx).fillna(False)
-    if "drawdown" in df_all.columns:
-        dd = pd.to_numeric(df_all["drawdown"], errors="coerce")
-    else:
-        dd = (df_all["Close"] / df_all["Close"].cummax() - 1.0)
-    dd_ok = (dd <= -ddown_threshold).fillna(False)
-    conf = (cand & ema_ok & dd_ok)
-
-    def _min_run_filter(mask: pd.Series, min_len: int) -> pd.Series:
-        mask = pd.Series(mask, index=mask.index, dtype=bool)
-        run_id = (mask != mask.shift()).cumsum()
-        kept = mask.copy()
-        for _, seg in mask.groupby(run_id):
-            if seg.iloc[0] and len(seg) < min_len:
-                kept.loc[seg.index] = False
-        return kept
-
-    cand_f = _min_run_filter(cand, min_bear_run).astype(bool)
-    conf_f = _min_run_filter(conf, max(1, min_bear_run // 2)).astype(bool)
-    return cand_f, conf_f, p_bear, p_bear_ema
-
-cand_inf, conf_inf, p_bear, p_bear_ema = _infer_bear_masks_plus(df)
-
-# Prefer pipeline masks only when they actually have signals
-pipeline_has_cand = bool(bear_cand_raw.any())
-pipeline_has_conf = bool(bear_conf_raw.any())
-
-bear_cand_used = bear_cand_raw if pipeline_has_cand else cand_inf
-bear_conf_used = bear_conf_raw if pipeline_has_conf else conf_inf
-
-# Reindex to zoom & build candidate-only view
 bear_cand = bear_cand_used.reindex(px_zoom.index).fillna(False)
 bear_conf = bear_conf_used.reindex(px_zoom.index).fillna(False)
 cand_only = (bear_cand & (~bear_conf))
-
-# Third plot
-ymin = float(px_zoom["Close"].min()) * 0.95
-ymax = float(px_zoom["Close"].max()) * 1.05
 
 fig_reg = go.Figure()
 fig_reg.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["Close"],  name="Close",
@@ -364,8 +313,9 @@ fig_reg.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["ema20"], name="EMA20",
 fig_reg.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["ema100"], name="EMA100",
                              mode="lines", line=dict(width=1.6, color="#2ca02c")))
 
-_add_vbands(fig_reg, px_zoom.index, cand_only, "crimson", 0.12, ymin, ymax)  # candidate (light red)
-_add_vbands(fig_reg, px_zoom.index, bear_conf, "crimson", 0.30, ymin, ymax)  # confirmed (dark red)
+# Robust shading (yref='paper' spans full chart height)
+_add_vbands(fig_reg, px_zoom.index, cand_only, "crimson", 0.12)
+_add_vbands(fig_reg, px_zoom.index, bear_conf, "crimson", 0.30)
 
 params_str = (
     f"k_fwd={k_forward}, EMA={ema_span}, enter={bear_enter:.2f}, exit={bear_exit:.2f}, "
@@ -385,28 +335,35 @@ fig_reg.update_layout(
     margin=dict(l=10, r=10, t=90, b=10),
     legend=dict(orientation="h", x=0, xanchor="left", y=1.02, yanchor="bottom"),
     xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
-    yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)", range=[ymin, ymax]),
+    yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
     hovermode="x unified",
 )
 st.plotly_chart(fig_reg, use_container_width=True, theme="streamlit")
 
-# --------------- Debug UI ---------------
+# ===========================================================================#
+#                               DEBUG PANEL                                  #
+# ===========================================================================#
 show_debug = st.sidebar.checkbox("Debug mode (regimes)", value=False)
 
 if show_debug:
     st.markdown("### Regime debug")
+
+    # Figure out which source we used (no NameError, no hidden vars)
+    candidate_source = "pipeline" if bear_cand_raw.any() else "inferred"
+    confirm_source   = "pipeline" if bear_conf_raw.any() else "inferred"
+
     with st.expander("Input/columns snapshot", expanded=True):
         st.write({
-            "df.shape": list(df.shape),
+            "df.shape": df.shape,
             "index.range": f"{df.index.min()} → {df.index.max()}",
-            "has_bear_candidate_col": "bear_candidate" in df.columns,
-            "has_bear_confirm_col": "bear_confirm" in df.columns,
-            "pipeline_has_candidate_true": pipeline_has_cand,
-            "pipeline_has_confirm_true": pipeline_has_conf,
-            "candidate_source": "pipeline" if pipeline_has_cand else "inferred",
-            "confirm_source":   "pipeline" if pipeline_has_conf else "inferred",
+            "has_bear_candidate_col": bool("bear_candidate" in df.columns),
+            "has_bear_confirm_col": bool("bear_confirm" in df.columns),
+            "pipeline_has_candidate_true": bool(bear_cand_raw.any()),
+            "pipeline_has_confirm_true":  bool(bear_conf_raw.any()),
+            "candidate_source": candidate_source,
+            "confirm_source":   confirm_source,
         })
-        st.write("Columns:", list(df.columns)[:50])
+        st.write("Columns:", list(df.columns)[:40])
 
     with st.expander("Mask counts on the zoom window", expanded=True):
         st.write({
@@ -416,14 +373,14 @@ if show_debug:
             "confirmed_inferred.sum": int(conf_inf.reindex(px_zoom.index).fillna(False).sum()),
         })
 
-    # Probability debug plot (only if we actually have a series)
-    if isinstance(p_bear, pd.Series) and not p_bear.empty:
+    # Probability plot if available (helps explain why shading might start/stop)
+    p_bear = _try_get_prob_series(df) or pd.Series([], dtype=float)
+    if not p_bear.empty:
         pz = p_bear.reindex(px_zoom.index)
-        pz_ema = p_bear_ema.reindex(px_zoom.index) if isinstance(p_bear_ema, pd.Series) else None
+        pz_ema = pz.ewm(span=ema_span, adjust=False).mean()
         fig_prob = go.Figure()
         fig_prob.add_trace(go.Scatter(x=pz.index, y=pz.values, name="p_bear", mode="lines"))
-        if pz_ema is not None:
-            fig_prob.add_trace(go.Scatter(x=pz_ema.index, y=pz_ema.values, name=f"EMA({ema_span})", mode="lines"))
+        fig_prob.add_trace(go.Scatter(x=pz_ema.index, y=pz_ema.values, name=f"EMA({ema_span})", mode="lines"))
         fig_prob.add_hline(y=bear_enter, line=dict(width=1, dash="dash"),
                            annotation_text="enter", annotation_position="top left")
         fig_prob.add_hline(y=bear_exit, line=dict(width=1, dash="dot"),
@@ -431,6 +388,7 @@ if show_debug:
         fig_prob.update_layout(height=260, template="plotly_white", title="Bear probability (raw & EMA)")
         st.plotly_chart(fig_prob, use_container_width=True)
 
+    # Segment table (exactly what should be shaded)
     def _seg_rows(mask: pd.Series, label: str):
         rows = []
         for s, e in _segments(mask.index, mask.values):
@@ -440,9 +398,8 @@ if show_debug:
     seg_rows = _seg_rows(cand_only, "bear_candidate_only") + _seg_rows(bear_conf, "bear_confirm")
     seg_df = pd.DataFrame(seg_rows)
     if seg_df.empty:
-        st.info("No segments in zoom window. If you expect bears, try lowering `bear_enter`, reducing `ema_span`, or shrinking `min_bear_run`.")
+        st.info("No segments found in the zoom window. If you expect bears, lower `bear_enter`, decrease `ema_span`, or reduce `min_bear_run`.")
     else:
         st.dataframe(seg_df, use_container_width=True)
 
-# Footer
 st.caption("Author: Dr. Poulami Nandi · Research demo only. Not investment advice.")
