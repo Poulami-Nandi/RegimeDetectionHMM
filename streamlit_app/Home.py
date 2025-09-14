@@ -463,6 +463,21 @@ if "ema100" not in df.columns:
 cutoff = df.index.max() - pd.DateOffset(years=zoom_years)
 px_zoom = df.loc[df.index >= cutoff].copy()
 
+def _safe_col(df: pd.DataFrame, name: str) -> pd.Series:
+    # Strictly-boolean, aligned getter; returns all-False if column missing
+    s = df.get(name, pd.Series(False, index=df.index))
+    return pd.Series(s, index=df.index).fillna(False).astype(bool)
+
+# 4 regime masks (aligned to px_zoom)
+bull_cand = _safe_col(px_zoom, "bull_candidate")
+bull_conf = _safe_col(px_zoom, "bull_confirm")
+bear_cand = _safe_col(px_zoom, "bear_candidate")
+bear_conf = _safe_col(px_zoom, "bear_confirm")
+
+# candidate-only versions so confirmed doesn’t double-shade
+bull_cand_only = bull_cand & (~bull_conf)
+bear_cand_only = bear_cand & (~bear_conf)
+
 # ============= 4-color shading + confirmed segments CSV (last 3y) =============
 from pathlib import Path
 
@@ -526,19 +541,6 @@ bear_conf = reg_zoom.get("bear_confirm",   pd.Series(False, index=px_zoom.index)
 
 bull_cand_only = bull_cand & (~bull_conf)
 bear_cand_only = bear_cand & (~bear_conf)
-
-# candidate-only versions (so confirmed doesn’t “double shade”)
-bull_cand_only = bull_cand & (~bull_conf)
-bear_cand_only = bear_cand & (~bear_conf)
-
-ymin = float(px_zoom["Close"].min()) * 0.95
-ymax = float(px_zoom["Close"].max()) * 1.05
-
-# Apply 4-color shading to your last-3y regimes figure (named e.g., fig_reg)
-_add_band(fig_reg, px_zoom.index, bull_cand_only.values, "#2ca02c", 0.12, ymin, ymax)  # light green
-_add_band(fig_reg, px_zoom.index, bull_conf.values,      "#2ca02c", 0.30, ymin, ymax)  # dark  green
-_add_band(fig_reg, px_zoom.index, bear_cand_only.values, "#d62728", 0.12, ymin, ymax)  # light red
-_add_band(fig_reg, px_zoom.index, bear_conf.values,      "#d62728", 0.30, ymin, ymax)  # dark  red
 
 # -------- Save confirmed segments (last 3y) to CSV for page 2 ----------
 def _pick(val_series, ts, default=np.nan):
@@ -621,6 +623,14 @@ fig_reg.add_trace(go.Scatter(
     x=px_zoom.index, y=px_zoom["ema100"], name="EMA100",
     mode="lines", line=dict(width=1.7, color="#2ca02c")
 ))
+
+# --- 4-color shading goes HERE (after traces, before update_layout) ---
+ymin = float(px_zoom["Close"].min()) * 0.95
+ymax = float(px_zoom["Close"].max()) * 1.05
+_add_band(fig_reg, px_zoom.index, bull_cand_only, "#2ca02c", 0.12, ymin, ymax)  # light green
+_add_band(fig_reg, px_zoom.index, bull_conf,      "#2ca02c", 0.30, ymin, ymax)  # dark  green
+_add_band(fig_reg, px_zoom.index, bear_cand_only, "#d62728", 0.12, ymin, ymax)  # light red
+_add_band(fig_reg, px_zoom.index, bear_conf,      "#d62728", 0.30, ymin, ymax)  # dark  red
 
 # Light red: candidate-only; Dark red: confirmed
 _add_bear_shading(fig_reg, px_zoom.index, cand_only.values, ymin, ymax, opacity=0.12)
