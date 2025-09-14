@@ -417,23 +417,20 @@ def _infer_bear_masks(df_all: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Se
 
     return cand_f.astype(bool), conf_f.astype(bool), p_bear, p_bear_ema
 
-# 2) Choose masks: prefer pipeline’s if present/non-empty; otherwise use inferred
+# 2) Choose masks: use pipeline masks ONLY if they contain any True; otherwise use inferred
 bear_cand_raw = pd.Series(df.get("bear_candidate", False), index=df.index).astype(bool)
 bear_conf_raw = pd.Series(df.get("bear_confirm",   False), index=df.index).astype(bool)
-have_pipe_masks = bear_cand_raw.any() or bear_conf_raw.any()
 
+# Build inferred masks from probability + EMA + drawdown rules
 cand_inf, conf_inf, p_bear, p_bear_ema = _infer_bear_masks(df)
 
-if have_pipe_masks:
-    bear_cand = bear_cand_raw
-    bear_conf = bear_conf_raw
-else:
-    bear_cand = cand_inf
-    bear_conf = conf_inf
+# NEW: prefer pipeline masks only when they actually have signals
+bear_cand_used = bear_cand_raw if bear_cand_raw.any() else cand_inf
+bear_conf_used = bear_conf_raw if bear_conf_raw.any() else conf_inf
 
 # 3) Reindex masks to zoom window & build candidate-only view
-bear_cand = bear_cand.reindex(px_zoom.index).fillna(False)
-bear_conf = bear_conf.reindex(px_zoom.index).fillna(False)
+bear_cand = bear_cand_used.reindex(px_zoom.index).fillna(False)
+bear_conf = bear_conf_used.reindex(px_zoom.index).fillna(False)
 cand_only = (bear_cand & (~bear_conf))
 
 # 4) Third plot: TSLA + EMAs + shading
@@ -499,12 +496,14 @@ if show_debug:
 
     # Show counts on the zoom index (final masks used for shading)
     with st.expander("Mask counts on the zoom window", expanded=True):
-        st.write({
-            "candidate_used.sum": int(bear_cand.sum()),
-            "confirmed_used.sum": int(bear_conf.sum()),
-            "candidate_inferred.sum": int(cand_inf.reindex(px_zoom.index).fillna(False).sum()),
-            "confirmed_inferred.sum": int(conf_inf.reindex(px_zoom.index).fillna(False).sum()),
-        })
+    st.write({
+        "pipeline_candidate.any": bool(bear_cand_raw.any()),
+        "pipeline_confirm.any":  bool(bear_conf_raw.any()),
+        "candidate_used.sum": int(bear_cand.sum()),
+        "confirmed_used.sum": int(bear_conf.sum()),
+        "candidate_inferred.sum": int(cand_inf.reindex(px_zoom.index).fillna(False).sum()),
+        "confirmed_inferred.sum": int(conf_inf.reindex(px_zoom.index).fillna(False).sum()),
+    })
 
     # p_bear line and thresholds — this explains “why nothing shades”
     if not p_bear.empty:
