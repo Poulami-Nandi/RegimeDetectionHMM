@@ -1,9 +1,9 @@
 # streamlit_app/Home.py
-# streamlit_app/Home.py
 from __future__ import annotations
 import inspect
 from functools import wraps
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -113,41 +113,6 @@ def last_years(df: pd.DataFrame, years: int) -> pd.DataFrame:
     start = end - pd.DateOffset(years=years)
     return df.loc[df.index >= start].copy()
 
-def add_bear_shading(fig, df_reg, index_like, col, opacity=0.12, color="crimson", min_bars=3):
-    """
-    Shade contiguous True runs in df_reg[col] using the x-index of `index_like`
-    (a DataFrame of plotted prices or a DatetimeIndex).
-
-    - No forward/backward fill of booleans (prevents 'smearing').
-    - Only shades runs with length >= min_bars (filters 1–2 bar blips).
-    """
-    import pandas as pd
-
-    # Resolve target index we are plotting on (the zoom window)
-    idx = index_like.index if hasattr(index_like, "index") else index_like
-
-    # Pull series & align strictly to the plotted index (no fills to True)
-    if col not in df_reg.columns:
-        return fig
-    ser = df_reg[col].astype(bool)
-    ser = ser.reindex(idx, fill_value=False)  # anything missing -> False
-
-    # Find contiguous True runs
-    run_id = (ser != ser.shift()).cumsum()
-    for _, mask in ser.groupby(run_id):
-        if not mask.iloc[0]:
-            continue  # this run is False
-        if len(mask) < min_bars:
-            continue  # ignore tiny runs
-        x0, x1 = mask.index[0], mask.index[-1]
-        fig.add_vrect(
-            x0=x0, x1=x1,
-            fillcolor=color, opacity=opacity,
-            line_width=0, layer="below"
-        )
-    return fig
-
-
 def plot_close_emas(df: pd.DataFrame, title: str, h=440) -> go.Figure:
     fig = go.Figure()
     if not df.empty:
@@ -160,42 +125,23 @@ def plot_close_emas(df: pd.DataFrame, title: str, h=440) -> go.Figure:
             fig.add_trace(go.Scatter(x=df.index, y=df["EMA100"], name="EMA100 (slow)",
                                      mode="lines", line=dict(width=1.8, color="#63b3a4")))
     fig.update_layout(
-        title=dict(text=title, pad=dict(b=32)),  
+        title=dict(text=title, pad=dict(b=32)),
         template="plotly_white",
         height=h,
-        margin=dict(l=10, r=10, t=80, b=10),     
+        margin=dict(l=10, r=10, t=80, b=10),
         legend=dict(
             orientation="h",
             x=0,
             xanchor="left",
             y=1.02,
-            yanchor="bottom",                    
-            bgcolor="rgba(255, 255, 255, 0.8)"    
+            yanchor="bottom",
+            bgcolor="rgba(255, 255, 255, 0.8)"
         ),
         xaxis=dict(showgrid=True, gridcolor="rgba(0, 0, 0, 0.08)"),
         yaxis=dict(showgrid=True, gridcolor="rgba(0, 0, 0, 0.08)"),
     )
 
     return fig
-
-def add_bear_shading(fig: go.Figure, df_full: pd.DataFrame, df_view: pd.DataFrame,
-                     col: str, opacity: float):
-    # Shade intervals where df_full[col] is True but only across the df_view x-range
-    if df_full.empty or df_view.empty or col not in df_full:
-        return
-    mask = df_full[col].reindex(df_view.index).fillna(False).astype(bool)
-    in_blk, start = False, None
-    idx = list(mask.index)
-    for i, d in enumerate(idx):
-        v = bool(mask.loc[d])
-        last = (i == len(idx) - 1)
-        if v and not in_blk:
-            in_blk, start = True, d
-        if in_blk and (not v or last):
-            end = d
-            fig.add_vrect(x0=start, x1=end, fillcolor="#d62728",
-                          opacity=opacity, layer="below", line_width=0)
-            in_blk = False
 
 def ensure_kaleido() -> bool:
     """
@@ -214,7 +160,6 @@ def ensure_kaleido() -> bool:
 
     st.session_state["_kaleido_attempted"] = True
 
-    # Some managed hosts allow runtime pip; if it fails we just fall back gracefully
     try:
         with st.spinner("Installing 'kaleido' once for PNG export…"):
             subprocess.check_call([sys.executable, "-m", "pip", "install", "kaleido==0.2.1"])
@@ -317,7 +262,6 @@ download_png(fig2, "Download zoom chart (high-res)", "tsla_last_years.png")
 
 # ===================== Regime plot (runs after price charts) =====================
 
-# ======================= RUN PIPELINE (TSLA only) =======================
 def _call_detect_regimes_flexible(func, **vals):
     """
     Map our concept values to whatever parameter names `detect_regimes` supports.
@@ -374,9 +318,7 @@ def _call_detect_regimes_flexible(func, **vals):
     return res, None
 
 
-# after: from src.regime_detection import detect_regimes
-
-# --- make detect_regimes tolerant to different parameter names ---
+# --- alias wrapper (tolerant to different parameter names) ---
 _ALIAS_MAP = {
     "bear_enter":         ["prob_threshold", "enter_prob", "enter_threshold"],
     "bear_exit":          ["prob_exit", "exit_prob", "exit_threshold"],
@@ -413,14 +355,12 @@ def _wrap_detect_regimes(func):
 
     @wraps(func)
     def wrapper(*args, **kwargs):
-        # Most calls are kwargs-only in this app; still allow args passthrough
         if args:
             return func(*args, **kwargs)
         return func(**_map_kwargs(kwargs))
 
     return wrapper
 
-# Monkey-patch: from here on, ANY direct call gets filtered/aliased safely.
 detect_regimes = _wrap_detect_regimes(detect_regimes)
 
 df, model = _call_detect_regimes_flexible(
@@ -450,80 +390,61 @@ df, model = _call_detect_regimes_flexible(
     strict=strict,
 )
 
-
 # df is assumed to have columns: 'Close', optional 'ema20'/'ema100',
-# 'bear_candidate' (bool/int), 'bear_confirm' (bool/int).
-# If your function keeps EMAs separate, we compute them here on the fly:
+# 'bear_candidate' (bool/int), 'bear_confirm' (bool/int) and optionally bull masks.
+# If your function keeps EMAs separate, compute them here:
 if "ema20" not in df.columns:
     df["ema20"] = df["Close"].ewm(span=20, adjust=False).mean()
 if "ema100" not in df.columns:
     df["ema100"] = df["Close"].ewm(span=100, adjust=False).mean()
 
-# Last N years slice
+# Last N years slice for regime plot
 cutoff = df.index.max() - pd.DateOffset(years=zoom_years)
 px_zoom = df.loc[df.index >= cutoff].copy()
 
-def _safe_col(df: pd.DataFrame, name: str) -> pd.Series:
-    # Strictly-boolean, aligned getter; returns all-False if column missing
-    s = df.get(name, pd.Series(False, index=df.index))
-    return pd.Series(s, index=df.index).fillna(False).astype(bool)
+def _safe_col(dframe: pd.DataFrame, name: str) -> pd.Series:
+    """Strictly-boolean, aligned getter; returns all-False if column missing."""
+    s = dframe.get(name, pd.Series(False, index=dframe.index))
+    return pd.Series(s, index=dframe.index).fillna(False).astype(bool)
 
-# 4 regime masks (aligned to px_zoom)
-bull_cand = _safe_col(px_zoom, "bull_candidate")
-bull_conf = _safe_col(px_zoom, "bull_confirm")
+# -------- four regime masks (aligned to px_zoom) --------
+# If bull masks aren't provided by the pipeline, infer them as complements of bear masks.
 bear_cand = _safe_col(px_zoom, "bear_candidate")
 bear_conf = _safe_col(px_zoom, "bear_confirm")
+
+# optional bull masks; if missing, derive:
+bull_cand_raw = px_zoom.get("bull_candidate")
+bull_conf_raw = px_zoom.get("bull_confirm")
+
+if bull_cand_raw is None or bull_conf_raw is None:
+    # Define bull as NOT in bear (split candidate/confirmed by bear flags)
+    bull_conf = (~bear_conf) & (px_zoom["Close"].notna())
+    bull_cand = (~bear_cand) & (~bear_conf) & (px_zoom["Close"].notna())
+else:
+    bull_cand = _safe_col(px_zoom, "bull_candidate")
+    bull_conf = _safe_col(px_zoom, "bull_confirm")
 
 # candidate-only versions so confirmed doesn’t double-shade
 bull_cand_only = bull_cand & (~bull_conf)
 bear_cand_only = bear_cand & (~bear_conf)
 
-# ============= 4-color shading + confirmed segments CSV (last 3y) =============
-from pathlib import Path
+# ======================= Save confirmed segments CSV (last 3y) =======================
+from pathlib import Path as _Path
 
 def _segments_from_mask(index, mask_bool, min_len=1):
     out, start = [], None
-    for i, v in enumerate(mask_bool):
-        if bool(v) and start is None:
+    arr = mask_bool.values if hasattr(mask_bool, "values") else mask_bool
+    for i, v in enumerate(arr):
+        v = bool(v)
+        if v and start is None:
             start = index[i]
-        if (not bool(v) or i == len(mask_bool)-1) and start is not None:
-            end = index[i] if bool(v) and i == len(mask_bool)-1 else index[i-1]
+        if ((not v) or i == len(arr)-1) and start is not None:
+            end = index[i] if (v and i == len(arr)-1) else index[i-1]
             if (end - start).days + 1 >= min_len:
                 out.append((start, end))
             start = None
     return out
 
-# --- helpers for regime shading (paste above the plotting block) ---
-def _segments(index, mask_bool):
-    """Return [(start, end), ...] for contiguous True runs in mask_bool."""
-    out, start = [], None
-    # allow either a Series/Index-aligned mask or a plain array
-    if hasattr(mask_bool, "values"):
-        mask_iter = mask_bool.values
-    else:
-        mask_iter = mask_bool
-    for i, v in enumerate(mask_iter):
-        v = bool(v)
-        if v and start is None:
-            start = index[i]
-        elif (not v) and (start is not None):
-            out.append((start, index[i-1]))
-            start = None
-    if start is not None:
-        out.append((start, index[-1]))
-    return out
-
-def _add_band(fig, index, mask_bool, color, opacity, y0, y1):
-    """Add background rectangles for True-runs in mask_bool over [y0,y1]."""
-    for s, e in _segments(index, mask_bool):
-        fig.add_vrect(
-            x0=s, x1=e,
-            fillcolor=color, opacity=opacity,
-            line_width=0, layer="below", y0=y0, y1=y1
-        )
-
-
-# -------- Save confirmed segments (last 3y) to CSV for page 2 ----------
 def _pick(val_series, ts, default=np.nan):
     try:
         return float(val_series.loc[ts])
@@ -533,11 +454,11 @@ def _pick(val_series, ts, default=np.nan):
 def _collect_confirmed_segments(px_view: pd.DataFrame, label: str, mask: pd.Series):
     rows = []
     mask = pd.Series(mask, index=px_view.index).astype(bool)
-    for s, e in _segments_from_mask(px_view.index, mask.values, min_len=1):
+    for s, e in _segments_from_mask(px_view.index, mask, min_len=1):
         entry_price = _pick(px_view["Close"], s)
         exit_price  = _pick(px_view["Close"], e)
         days = (e - s).days + 1
-        ret  = (exit_price / entry_price - 1.0) if (entry_price and exit_price and entry_price!=0) else np.nan
+        ret  = (exit_price / entry_price - 1.0) if (entry_price and exit_price and entry_price != 0) else np.nan
         rows.append({
             "type": label,
             "start": s.strftime("%Y-%m-%d"),
@@ -554,25 +475,36 @@ rows += _collect_confirmed_segments(px_zoom, "bull_confirm", bull_conf)
 rows += _collect_confirmed_segments(px_zoom, "bear_confirm", bear_conf)
 
 seg_df = pd.DataFrame(rows, columns=["type","start","end","entry_price","exit_price","days","return"])
-out_dir = Path(REPO_ROOT, "reports")
+out_dir = _Path(REPO_ROOT, "reports")
 out_dir.mkdir(parents=True, exist_ok=True)
 out_csv = out_dir / "confirmed_segments_last3y.csv"
 seg_df.to_csv(out_csv, index=False)
 st.caption(f"Saved confirmed segments (last {zoom_years}y) → `{out_csv}`")
 
 # ======================= PLOTLY: TSLA regimes (last 3y) =======================
-def _add_bear_shading(fig, index, mask_bool, y0, y1, opacity):
-    for s, e in _segments(index, mask_bool):
-        fig.add_shape(
-            type="rect", x0=s, x1=e, y0=y0, y1=y1,
-            fillcolor="crimson", opacity=opacity, line=dict(width=0),
-            layer="below"
-        )
+def _segments(index, mask_bool):
+    """Return [(start_ts, end_ts), ...] of contiguous True runs."""
+    out, start = [], None
+    arr = mask_bool.values if hasattr(mask_bool, "values") else mask_bool
+    for i in range(len(index)):
+        m = bool(arr[i])
+        if m and start is None:
+            start = index[i]
+        elif (not m) and (start is not None):
+            out.append((start, index[i - 1]))
+            start = None
+    if start is not None:
+        out.append((start, index[-1]))
+    return out
 
-# Build candidate-only & confirmed masks (aligned to px_zoom)
-bear_cand = px_zoom.get("bear_candidate", pd.Series(False, index=px_zoom.index)).astype(bool)
-bear_conf = px_zoom.get("bear_confirm",   pd.Series(False, index=px_zoom.index)).astype(bool)
-cand_only = bear_cand & (~bear_conf)
+def _add_band(fig, index, mask_bool, color, opacity, y0, y1):
+    """Add background rectangles for True-runs in mask_bool over [y0,y1]."""
+    for s, e in _segments(index, mask_bool):
+        fig.add_vrect(
+            x0=s, x1=e,
+            fillcolor=color, opacity=opacity,
+            line_width=0, layer="below", y0=y0, y1=y1
+        )
 
 ymin = float(px_zoom["Close"].min()) * 0.95
 ymax = float(px_zoom["Close"].max()) * 1.05
@@ -591,17 +523,11 @@ fig_reg.add_trace(go.Scatter(
     mode="lines", line=dict(width=1.7, color="#2ca02c")
 ))
 
-# --- 4-color shading goes HERE (after traces, before update_layout) ---
-ymin = float(px_zoom["Close"].min()) * 0.95
-ymax = float(px_zoom["Close"].max()) * 1.05
-_add_band(fig_reg, px_zoom.index, bull_cand_only, "#2ca02c", 0.12, ymin, ymax)  # light green
-_add_band(fig_reg, px_zoom.index, bull_conf,      "#2ca02c", 0.30, ymin, ymax)  # dark  green
-_add_band(fig_reg, px_zoom.index, bear_cand_only, "#d62728", 0.12, ymin, ymax)  # light red
-_add_band(fig_reg, px_zoom.index, bear_conf,      "#d62728", 0.30, ymin, ymax)  # dark  red
-
-# Light red: candidate-only; Dark red: confirmed
-_add_bear_shading(fig_reg, px_zoom.index, cand_only.values, ymin, ymax, opacity=0.12)
-_add_bear_shading(fig_reg, px_zoom.index, bear_conf.values, ymin, ymax, opacity=0.30)
+# --- 4-color shading (after traces, before layout) ---
+_add_band(fig_reg, px_zoom.index, bull_cand_only, "#2ca02c", 0.12, ymin, ymax)  # light green  (candidate bull)
+_add_band(fig_reg, px_zoom.index, bull_conf,      "#2ca02c", 0.30, ymin, ymax)  # dark  green  (confirmed bull)
+_add_band(fig_reg, px_zoom.index, bear_cand_only, "#d62728", 0.12, ymin, ymax)  # light red    (candidate bear)
+_add_band(fig_reg, px_zoom.index, bear_conf,      "#d62728", 0.30, ymin, ymax)  # dark  red    (confirmed bear)
 
 # Title string mirrors your Colab chart
 params_str = (
@@ -727,4 +653,3 @@ def render_parameter_explainer():
 
 render_parameter_explainer()
 st.caption("Author: Dr. Poulami Nandi · Research demo only. Not investment advice.")
-
