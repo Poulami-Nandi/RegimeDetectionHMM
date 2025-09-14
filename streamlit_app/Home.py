@@ -496,14 +496,14 @@ if show_debug:
 
     # Show counts on the zoom index (final masks used for shading)
     with st.expander("Mask counts on the zoom window", expanded=True):
-    st.write({
-        "pipeline_candidate.any": bool(bear_cand_raw.any()),
-        "pipeline_confirm.any":  bool(bear_conf_raw.any()),
-        "candidate_used.sum": int(bear_cand.sum()),
-        "confirmed_used.sum": int(bear_conf.sum()),
-        "candidate_inferred.sum": int(cand_inf.reindex(px_zoom.index).fillna(False).sum()),
-        "confirmed_inferred.sum": int(conf_inf.reindex(px_zoom.index).fillna(False).sum()),
-    })
+        st.write({
+            "pipeline_candidate.any": bool(bear_cand_raw.any()),
+            "pipeline_confirm.any":  bool(bear_conf_raw.any()),
+            "candidate_used.sum": int(bear_cand.sum()),
+            "confirmed_used.sum": int(bear_conf.sum()),
+            "candidate_inferred.sum": int(cand_inf.reindex(px_zoom.index).fillna(False).sum()),
+            "confirmed_inferred.sum": int(conf_inf.reindex(px_zoom.index).fillna(False).sum()),
+        })
 
     # p_bear line and thresholds — this explains “why nothing shades”
     if not p_bear.empty:
