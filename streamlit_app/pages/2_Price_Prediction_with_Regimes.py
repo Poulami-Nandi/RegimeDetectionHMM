@@ -84,6 +84,18 @@ def _align_like(a: pd.Series, b: pd.Series) -> tuple[pd.Series, pd.Series]:
     mask = ~(a.isna() | b2.isna())
     return a[mask], b2[mask]
 
+def _rmse(y_true: pd.Series, y_pred: pd.Series) -> float:
+    """RMSE without extra deps."""
+    y_true, y_pred = y_true.align(y_pred, join="inner")
+    y_true = pd.to_numeric(y_true, errors="coerce").astype(float)
+    y_pred = pd.to_numeric(y_pred, errors="coerce").astype(float)
+    m = ~(y_true.isna() | y_pred.isna())
+    n = int(m.sum())
+    if n < 5:
+        return np.nan
+    diff = (y_true[m] - y_pred[m]).values
+    return float(np.sqrt(np.mean(diff * diff)))
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_ohlcv_last_years(ticker: str = "TSLA", years: int = 3) -> pd.DataFrame:
     """OHLCV for last N years (auto-adjusted)."""
@@ -190,7 +202,7 @@ with st.spinner("Fetching TSLA & detecting regimes…"):
     reg_zoom = df_reg.reindex(px_zoom.index)
 
 # Normalize dtypes to strict booleans (avoids array/nested types)
-for col in ["bear_candidate", "bear_confirm"]:
+for col in ["bear_candidate", "bear_confirm", "bull_candidate", "bull_confirm"]:
     if col in reg_zoom.columns:
         reg_zoom[col] = reg_zoom[col].astype(bool)
 
@@ -228,53 +240,78 @@ if min(len(close), len(base), len(final)) < 5:
     st.warning("Not enough aligned points to plot after cleaning/alignment.")
     st.stop()
 
-# ========================= Plot =========================
-def _segments(index, mask_bool):
-    out, start = [], None
-    for i in range(len(index)):
-        m = bool(mask_bool[i])
-        if m and start is None:
-            start = index[i]
-        elif (not m) and (start is not None):
-            out.append((start, index[i - 1])); start = None
-    if start is not None:
-        out.append((start, index[-1]))
-    return out
+# ========================= Hybrid via confirmed windows (CSV from Home.py) =========================
+seg_csv = Path(REPO_ROOT, "reports", "confirmed_segments_last3y.csv")
+confirmed_windows: list[tuple[pd.Timestamp, pd.Timestamp, str]] = []
+if seg_csv.exists():
+    try:
+        seg_raw = pd.read_csv(seg_csv)
+        seg_raw = seg_raw[seg_raw["type"].isin(["bull_confirm", "bear_confirm"])].copy()
+        seg_raw["start"] = pd.to_datetime(seg_raw["start"])
+        seg_raw["end"]   = pd.to_datetime(seg_raw["end"])
+        confirmed_windows = [(r["start"], r["end"], r["type"]) for _, r in seg_raw.iterrows()]
+        st.caption(f"Loaded confirmed windows from `{seg_csv}`")
+    except Exception as e:
+        st.warning(f"Could not read confirmed segments CSV ({e}). Proceeding without hybrid swap.")
+else:
+    st.info("Confirmed segments CSV not found. Generate it by opening the Home page once (it saves last-3y confirmed segments).")
 
-bear_cand = reg_zoom.get("bear_candidate", pd.Series(False, index=close.index)).reindex(close.index).fillna(False).astype(bool).values
-bear_conf = reg_zoom.get("bear_confirm",   pd.Series(False, index=close.index)).reindex(close.index).fillna(False).astype(bool).values
-cand_only = bear_cand & (~bear_conf)
+# Hybrid: ARIMA except replaced by regime-aware during confirmed bull/bear windows
+hybrid = base.copy()
+if confirmed_windows:
+    idx_min, idx_max = close.index.min(), close.index.max()
+    for s, e, typ in confirmed_windows:
+        s2 = max(pd.Timestamp(s), idx_min)
+        e2 = min(pd.Timestamp(e), idx_max)
+        if s2 <= e2:
+            mask = (hybrid.index >= s2) & (hybrid.index <= e2)
+            # Replace with regime-aware forecast for those dates
+            hybrid.loc[mask] = final.loc[mask]
 
+# ========================= RMSEs =========================
+rmse_arima  = _rmse(close, base)
+rmse_hybrid = _rmse(close, hybrid)
+
+# ========================= Plot (Actual vs ARIMA vs Hybrid) =========================
+fig = go.Figure()
+
+# Background shading to show confirmed windows (green for bull, red for bear)
 ymin = float(close.min()) * 0.95
 ymax = float(close.max()) * 1.05
+for s, e, typ in confirmed_windows:
+    s2 = max(pd.Timestamp(s), close.index.min())
+    e2 = min(pd.Timestamp(e), close.index.max())
+    if s2 <= e2:
+        fig.add_vrect(
+            x0=s2, x1=e2,
+            fillcolor=("#2ca02c" if typ == "bull_confirm" else "#d62728"),
+            opacity=0.16, line_width=0, layer="below"
+        )
 
-fig = go.Figure()
-# background shading first (below lines)
-for s, e in _segments(close.index, cand_only):
-    fig.add_vrect(x0=s, x1=e, fillcolor="crimson", opacity=0.12, line_width=0, layer="below")
-for s, e in _segments(close.index, bear_conf):
-    fig.add_vrect(x0=s, x1=e, fillcolor="crimson", opacity=0.30, line_width=0, layer="below")
-
-# lines
+# Lines
 fig.add_trace(go.Scatter(
-    x=close.index, y=close.values, name="Close",
-    mode="lines", line=dict(width=1.9, color="#111")
+    x=close.index, y=close.values, name="Actual (Close)",
+    mode="lines", line=dict(width=2.0, color="#111")
 ))
 fig.add_trace(go.Scatter(
-    x=base.index, y=base.values, name=f"ARIMA({p},{d},{q}) base (one-step)",
+    x=base.index, y=base.values,
+    name=(f"ARIMA({p},{d},{q}) — RMSE={rmse_arima:.3f}" if pd.notna(rmse_arima) else f"ARIMA({p},{d},{q})"),
     mode="lines", line=dict(width=2.0, dash="dash", color="#d62728")
 ))
 fig.add_trace(go.Scatter(
-    x=final.index, y=final.values, name="Regime-aware forecast",
+    x=hybrid.index, y=hybrid.values,
+    name=(f"Hybrid (Regime-aware inside confirmed windows) — RMSE={rmse_hybrid:.3f}"
+          if pd.notna(rmse_hybrid) else "Hybrid (Regime-aware inside confirmed windows)"),
     mode="lines", line=dict(width=2.4, color="#1f77b4")
 ))
 
 fig.update_layout(
-    title=f"TSLA — Regime-aware forecast (last {zoom_years}y; light=candidate, dark=confirmed)",
+    title=f"TSLA — Actual vs ARIMA vs Hybrid (last {zoom_years}y; shaded = confirmed bull/bear windows)",
     template="plotly_white",
-    height=540,
-    margin=dict(l=10, r=10, t=80, b=10),
-    legend=dict(orientation="h", x=0, y=1.02, xanchor="left", yanchor="bottom"),
+    height=560,
+    margin=dict(l=10, r=10, t=90, b=10),
+    legend=dict(orientation="h", x=0, y=1.02, xanchor="left", yanchor="bottom",
+                bgcolor="rgba(255,255,255,0.85)"),
     xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
     yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)", range=[ymin, ymax]),
     hovermode="x unified",
@@ -284,15 +321,16 @@ st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
 with st.expander("What’s happening here?", expanded=False):
     st.markdown(
-        """
-**Baseline:** ARIMA one-step-ahead projection on last-N-years daily **Close** (built from OHLCV).  
-**Bias:** We tilt that baseline using regime signals and recent volatility (σ):
+        f"""
+**Baseline:** ARIMA one-step-ahead projection on last-{zoom_years} years daily **Close** (built from OHLCV).  
+**Regime-aware:** Baseline tilted by regime + recent volatility (σ).  
+**Hybrid:** Use ARIMA everywhere, but **swap to regime-aware** inside **confirmed bull/bear windows** saved by the Home page.
 
-- **Bull/sideways** → bias ≈ `+ bull_k × σ` (gentle uplift)  
-- **Bear (candidate)** → bias ≈ `bear_k_cand × σ` (small downward tilt)  
-- **Bear (confirmed)** → bias ≈ `bear_k_conf × σ` (stronger downward tilt)
+- RMSE(ARIMA): **{rmse_arima:.3f}**  
+- RMSE(Hybrid): **{rmse_hybrid:.3f}**
 
-This page is read-only: it **does not change** the underlying detection code or the Home page.
+Shaded bands show the windows where the Hybrid uses regime-aware values:
+green = confirmed bull, red = confirmed bear.
         """
     )
 
