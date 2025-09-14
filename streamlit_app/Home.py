@@ -250,6 +250,116 @@ st.caption(
     f"Diagnostic — full span: {full_years:,.1f}y; zoom window: {zoom_years}y."
 )
 
+# ===================== Regime masks (robust) + CSV save + shading =====================
+from pathlib import Path
+import numpy as np
+
+def _safe_bool(df: pd.DataFrame, name: str) -> pd.Series:
+    s = df.get(name, pd.Series(False, index=df.index))
+    return pd.Series(s, index=df.index).fillna(False).astype(bool)
+
+def _segments_index(index: pd.DatetimeIndex, mask: pd.Series | np.ndarray, min_len: int = 1):
+    """Return [(start, end), ...] for contiguous True runs; min_len measured in bars."""
+    mask = np.asarray(mask, dtype=bool)
+    out, start = [], None
+    for i, v in enumerate(mask):
+        if v and start is None:
+            start = index[i]
+        if (not v or i == len(mask) - 1) and start is not None:
+            end = index[i] if v and i == len(mask) - 1 else index[i - 1]
+            if (index.get_indexer([end])[0] - index.get_indexer([start])[0] + 1) >= min_len:
+                out.append((start, end))
+            start = None
+    return out
+
+# ---- try to read masks from pipeline output ----
+bear_cand = _safe_bool(px_zoom, "bear_candidate")
+bear_conf = _safe_bool(px_zoom, "bear_confirm")
+have_pipeline_masks = bear_cand.any() or bear_conf.any()
+
+# ---- fallback masks (when pipeline didn’t populate columns) ----
+if not have_pipeline_masks:
+    # Drawdown from rolling max (lookback = 252 trading days ~ 1y)
+    roll_max = px_zoom["Close"].cummax()
+    ddown = 1.0 - (px_zoom["Close"] / roll_max)                 # 0 … 1
+    mom_gap = (px_zoom["ema20"] - px_zoom["ema100"]) / px_zoom["ema100"]
+
+    # Candidate bear: weak momentum OR drawdown elevated
+    bear_cand = ((mom_gap < 0) | (ddown > max(0.05, ddown_threshold))).astype(bool)
+
+    # Confirmed bear: both weak momentum and drawdown beyond threshold, with persistence
+    raw_conf = ((mom_gap < -abs(mom_threshold)) & (ddown > ddown_threshold)).astype(int)
+    # persistence (confirm_days); if confirm_days=0 this is a no-op
+    if confirm_days > 0:
+        conf_roll = raw_conf.rolling(confirm_days, min_periods=confirm_days).sum()
+        bear_conf = (conf_roll >= confirm_days).astype(bool).reindex(px_zoom.index).fillna(False)
+    else:
+        bear_conf = raw_conf.astype(bool)
+
+# ---- bull masks: prefer pipeline, otherwise infer from bear masks / momentum ----
+bull_cand = _safe_bool(px_zoom, "bull_candidate")
+bull_conf = _safe_bool(px_zoom, "bull_confirm")
+
+if not (bull_cand.any() or bull_conf.any()):
+    # If pipeline didn’t provide bull_*, infer them
+    bull_conf = (~bear_conf) & (px_zoom["ema20"] > px_zoom["ema100"])
+    # candidate bull = non-confirmed area leaning bullish (but not yet confirmed)
+    bull_cand = (~bear_conf) & (~bull_conf) & (px_zoom["ema20"] >= px_zoom["ema100"])
+
+# Candidate-only (to avoid double shading with confirmed)
+bull_cand_only = bull_cand & (~bull_conf)
+bear_cand_only = bear_cand & (~bear_conf)
+
+# ---- Save confirmed segments (last Ny window) to CSV and show a preview ----
+def _pick(v: pd.Series, t):
+    try:
+        return float(v.loc[t])
+    except Exception:
+        return np.nan
+
+rows = []
+for label, mask in (("bull_confirm", bull_conf), ("bear_confirm", bear_conf)):
+    for s, e in _segments_index(px_zoom.index, mask, min_len=1):
+        entry_p = _pick(px_zoom["Close"], s)
+        exit_p  = _pick(px_zoom["Close"], e)
+        ret = (exit_p / entry_p - 1.0) if (np.isfinite(entry_p) and np.isfinite(exit_p) and entry_p != 0) else np.nan
+        rows.append({
+            "type": label,
+            "start": s.strftime("%Y-%m-%d"),
+            "end":   e.strftime("%Y-%m-%d"),
+            "entry_price": entry_p,
+            "exit_price":  exit_p,
+            "days": (e - s).days + 1,
+            "return": ret,
+        })
+
+seg_df = pd.DataFrame(rows, columns=["type","start","end","entry_price","exit_price","days","return"])
+reports_dir = Path(REPO_ROOT, "reports")
+reports_dir.mkdir(parents=True, exist_ok=True)
+csv_path = reports_dir / "confirmed_segments_last3y.csv"
+seg_df.to_csv(csv_path, index=False)
+
+with st.expander("Confirmed regime segments (saved to CSV)", expanded=False):
+    st.write(f"Saved to: `{csv_path}`")
+    st.dataframe(seg_df, use_container_width=True)
+    st.download_button("Download CSV", data=seg_df.to_csv(index=False).encode("utf-8"),
+                       file_name="confirmed_segments_last3y.csv", mime="text/csv")
+
+# ---- 4-color shading on the regimes chart ----
+def _add_color_bands(fig: go.Figure, idx: pd.DatetimeIndex, mask: pd.Series, color: str, opacity: float):
+    for s, e in _segments_index(idx, mask):
+        fig.add_vrect(x0=s, x1=e, fillcolor=color, opacity=opacity, line_width=0, layer="below")
+
+ymin = float(px_zoom["Close"].min()) * 0.95
+ymax = float(px_zoom["Close"].max()) * 1.05
+
+# If you created fig_reg above, apply the bands to that figure:
+#   light green  = bull candidate; dark green  = bull confirmed
+#   light red    = bear candidate; dark red    = bear confirmed
+_add_color_bands(fig_reg, px_zoom.index, bull_cand_only, "#2ca02c", 0.12)
+_add_color_bands(fig_reg, px_zoom.index, bull_conf,      "#2ca02c", 0.30)
+_add_color_bands(fig_reg, px_zoom.index, bear_cand_only, "#d62728", 0.12)
+_add_color_bands(fig_reg, px_zoom.index, bear_conf,      "#d62728", 0.30)
 # -------- Chart 1: IPO→today (from full Yahoo series) --------
 fig1 = plot_close_emas(px_full, "TSLA — Close with EMA20 / EMA100 (IPO → today)")
 st.plotly_chart(fig1, use_container_width=True, theme="streamlit")
