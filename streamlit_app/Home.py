@@ -463,6 +463,87 @@ if "ema100" not in df.columns:
 cutoff = df.index.max() - pd.DateOffset(years=zoom_years)
 px_zoom = df.loc[df.index >= cutoff].copy()
 
+# ============= 4-color shading + confirmed segments CSV (last 3y) =============
+from pathlib import Path
+
+def _segments_from_mask(index, mask_bool, min_len=1):
+    out, start = [], None
+    for i, v in enumerate(mask_bool):
+        if bool(v) and start is None:
+            start = index[i]
+        if (not bool(v) or i == len(mask_bool)-1) and start is not None:
+            end = index[i] if bool(v) and i == len(mask_bool)-1 else index[i-1]
+            if (end - start).days + 1 >= min_len:
+                out.append((start, end))
+            start = None
+    return out
+
+def _add_band(fig, index, mask, color, opacity, y0, y1):
+    for s, e in _segments_from_mask(index, mask):
+        fig.add_vrect(x0=s, x1=e, y0=y0, y1=y1, fillcolor=color, opacity=opacity, line_width=0, layer="below")
+
+def _safe_col(df, name):
+    # Robust getter ⇒ returns strictly-boolean aligned Series (all False if missing)
+    s = df.get(name, pd.Series(False, index=df.index))
+    s = pd.Series(s, index=df.index).fillna(False).astype(bool)
+    return s
+
+# build masks aligned to px_zoom (last 3y)
+bull_cand = _safe_col(px_zoom, "bull_candidate")
+bull_conf = _safe_col(px_zoom, "bull_confirm")
+bear_cand = _safe_col(px_zoom, "bear_candidate")
+bear_conf = _safe_col(px_zoom, "bear_confirm")
+
+# candidate-only versions (so confirmed doesn’t “double shade”)
+bull_cand_only = bull_cand & (~bull_conf)
+bear_cand_only = bear_cand & (~bear_conf)
+
+ymin = float(px_zoom["Close"].min()) * 0.95
+ymax = float(px_zoom["Close"].max()) * 1.05
+
+# Apply 4-color shading to your last-3y regimes figure (named e.g., fig_reg)
+_add_band(fig_reg, px_zoom.index, bull_cand_only.values, "#2ca02c", 0.12, ymin, ymax)  # light green
+_add_band(fig_reg, px_zoom.index, bull_conf.values,      "#2ca02c", 0.30, ymin, ymax)  # dark  green
+_add_band(fig_reg, px_zoom.index, bear_cand_only.values, "#d62728", 0.12, ymin, ymax)  # light red
+_add_band(fig_reg, px_zoom.index, bear_conf.values,      "#d62728", 0.30, ymin, ymax)  # dark  red
+
+# -------- Save confirmed segments (last 3y) to CSV for page 2 ----------
+def _pick(val_series, ts, default=np.nan):
+    try:
+        return float(val_series.loc[ts])
+    except Exception:
+        return default
+
+def _collect_confirmed_segments(px_view: pd.DataFrame, label: str, mask: pd.Series):
+    rows = []
+    mask = pd.Series(mask, index=px_view.index).astype(bool)
+    for s, e in _segments_from_mask(px_view.index, mask.values, min_len=1):
+        entry_price = _pick(px_view["Close"], s)
+        exit_price  = _pick(px_view["Close"], e)
+        days = (e - s).days + 1
+        ret  = (exit_price / entry_price - 1.0) if (entry_price and exit_price and entry_price!=0) else np.nan
+        rows.append({
+            "type": label,
+            "start": s.strftime("%Y-%m-%d"),
+            "end":   e.strftime("%Y-%m-%d"),
+            "entry_price": entry_price,
+            "exit_price":  exit_price,
+            "days": days,
+            "return": ret,
+        })
+    return rows
+
+rows = []
+rows += _collect_confirmed_segments(px_zoom, "bull_confirm", bull_conf)
+rows += _collect_confirmed_segments(px_zoom, "bear_confirm", bear_conf)
+
+seg_df = pd.DataFrame(rows, columns=["type","start","end","entry_price","exit_price","days","return"])
+out_dir = Path(REPO_ROOT, "reports")
+out_dir.mkdir(parents=True, exist_ok=True)
+out_csv = out_dir / "confirmed_segments_last3y.csv"
+seg_df.to_csv(out_csv, index=False)
+st.caption(f"Saved confirmed segments (last {zoom_years}y) → `{out_csv}`")
+
 # ======================= PLOTLY: TSLA regimes (last 3y) =======================
 def _segments(index, mask_bool):
     """Return [(start_ts, end_ts), ...] of contiguous True runs."""
