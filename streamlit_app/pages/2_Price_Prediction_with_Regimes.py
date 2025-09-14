@@ -1,50 +1,38 @@
 # streamlit_app/pages/2_Price_Prediction_with_Regimes.py
 from __future__ import annotations
-import sys, os
-from pathlib import Path
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-import streamlit as st
-import yfinance as yf
-import inspect
 
+# ---- stdlib / path setup ----
+import sys, os, inspect, importlib
+from pathlib import Path
+
+# ---- third-party ----
 import numpy as np
 import pandas as pd
+import yfinance as yf
 import plotly.graph_objects as go
 import streamlit as st
 from statsmodels.tsa.arima.model import ARIMA
-import pandas as pd
-import yfinance as yf
 
-
-def _clean_series(s: pd.Series) -> pd.Series:
-    """Coerce to float, drop NaNs."""
-    if isinstance(s, pd.DataFrame):
-        s = s.iloc[:, 0]
-    s = pd.to_numeric(s, errors="coerce")
-    return s.astype(float).dropna()
-
-def _align_like(a: pd.Series, b: pd.Series) -> tuple[pd.Series, pd.Series]:
-    """Reindex b to a's index; drop all-NaN rows consistently."""
-    b2 = b.reindex(a.index)
-    mask = ~(a.isna() | b2.isna())
-    return a[mask], b2[mask]
-
-# Make repo root importable (no edits to existing code)
+# ========= repo import path (no edits to existing code) =========
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-# Import your unchanged pipeline
+# ========= unchanged pipeline =========
 from src.regime_detection import detect_regimes
-from addons.regime_bias import base_forecast_close, apply_regime_bias
 
+# ========= regime bias (reload to pick up latest shape-safe version) =========
+import addons.regime_bias as _rb
+importlib.reload(_rb)  # ensure we use the updated function definition
+from addons.regime_bias import apply_regime_bias
+
+
+# ========= Streamlit page =========
 st.set_page_config(page_title="Regime-aware Forecast (TSLA demo)", layout="wide")
 st.title("Regime-aware Price Forecast — TSLA (add-on demo)")
 st.caption("This page is additive. It reuses the existing pipeline and does not modify the original app.")
 
-# --------- Sidebar: locked to TSLA + familiar knobs ----------
+# ---------------- Sidebar: locked to TSLA + familiar knobs ----------------
 st.sidebar.header("Controls (TSLA demo)")
 ticker = "TSLA"
 zoom_years = st.sidebar.slider("Zoom window (years)", 1, 10, 3, 1)
@@ -81,24 +69,24 @@ with st.sidebar.expander("ARIMA baseline (advanced)"):
     p = st.number_input("ARIMA p", 0, 5, value=1, step=1)
     d = st.number_input("ARIMA d", 0, 2, value=1, step=1)
     q = st.number_input("ARIMA q", 0, 5, value=1, step=1)
-# --------- Data fetch (direct full history for the forecast chart) ----------
+
+# ========================= Helpers =========================
+def _clean_series(s: pd.Series) -> pd.Series:
+    """Coerce to float, drop NaNs, ensure 1-D series."""
+    if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
+    s = pd.to_numeric(s, errors="coerce")
+    return s.astype(float).dropna()
+
+def _align_like(a: pd.Series, b: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """Reindex b to a's index; drop rows where either is NaN."""
+    b2 = b.reindex(a.index)
+    mask = ~(a.isna() | b2.isna())
+    return a[mask], b2[mask]
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_tsla():
-    df = yf.download("TSLA", period="max", auto_adjust=True, progress=False)
-    if df.index.tz is not None:
-        df.index = df.index.tz_localize(None)
-    return df[["Close"]].dropna()
-
-px = get_tsla()
-cutoff = px.index.max() - pd.DateOffset(years=zoom_years)
-px_zoom = px.loc[px.index >= cutoff].copy()
-
-@st.cache_data(show_spinner=False, ttl=3600)
 def fetch_ohlcv_last_years(ticker: str = "TSLA", years: int = 3) -> pd.DataFrame:
-    """
-    Robust OHLCV fetch for the last `years` of daily data.
-    Uses auto-adjusted prices (div/splits).
-    """
+    """OHLCV for last N years (auto-adjusted)."""
     df = yf.download(ticker, period=f"{years}y", interval="1d",
                      auto_adjust=True, progress=False)
     if df.empty:
@@ -108,37 +96,41 @@ def fetch_ohlcv_last_years(ticker: str = "TSLA", years: int = 3) -> pd.DataFrame
     cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
     return df[cols].dropna()
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_close_full(ticker: str = "TSLA") -> pd.DataFrame:
+    """Full max history Close for slicing the zoom window index."""
+    df = yf.download(ticker, period="max", interval="1d",
+                     auto_adjust=True, progress=False)
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    return df[["Close"]].dropna()
+
 def base_forecast_close_arima(ohlcv: pd.DataFrame, order=(1, 1, 1)) -> pd.Series:
     """
     One-step-ahead ARIMA baseline for the *historical* Close series.
     Returns a Series aligned to ohlcv.index named 'base_forecast'.
-
-    We use in-sample one-step predictions (dynamic=False) to create
-    a same-length baseline that can be bias-adjusted per regime.
     """
     if ohlcv is None or ohlcv.empty or "Close" not in ohlcv:
         return pd.Series(dtype=float, name="base_forecast")
 
     close = ohlcv["Close"].astype(float)
     if len(close) < 50:
-        # too short for ARIMA — just mirror Close so downstream doesn’t break
         return close.rename("base_forecast")
 
     try:
         model = ARIMA(close, order=order)
         res = model.fit()
-        # one-step-ahead fitted values for the full span
+        # one-step-ahead predicted mean; align to same index (fill first)
         pred = res.get_prediction(start=close.index[1], end=close.index[-1], dynamic=False)
         base = pred.predicted_mean.reindex(close.index)
-        # fill the first element for nicer alignment
         base.iloc[0] = close.iloc[0]
         return base.rename("base_forecast")
     except Exception as e:
         st.warning(f"ARIMA baseline failed ({e}). Falling back to a simple EMA(10).")
         return close.ewm(span=10, adjust=False).mean().rename("base_forecast")
 
-# --------- Call your existing pipeline (unchanged) ----------
 def _call_detect_regimes(func, **vals):
+    """Flexible mapper to whatever signature your detect_regimes exposes."""
     sig = inspect.signature(func)
     params = set(sig.parameters.keys())
     out = {}
@@ -172,7 +164,14 @@ def _call_detect_regimes(func, **vals):
     res = func(**out)
     return res if isinstance(res, tuple) else (res, None)
 
-with st.spinner("Detecting regimes (unchanged pipeline)…"):
+# ========================= Data & pipeline =========================
+with st.spinner("Fetching TSLA & detecting regimes…"):
+    # Zoom index driven by full Close history
+    px_full = fetch_close_full(ticker)
+    cutoff  = px_full.index.max() - pd.DateOffset(years=zoom_years)
+    px_zoom = px_full.loc[px_full.index >= cutoff].copy()
+
+    # Unchanged pipeline over full history, reindexed to the zoom window
     df_reg, _ = _call_detect_regimes(
         detect_regimes,
         ticker=ticker, start="2000-01-01", end="today",
@@ -188,58 +187,32 @@ with st.spinner("Detecting regimes (unchanged pipeline)…"):
         entry_ddown_thresh=entry_ddown_thresh, bear_profit_exit=bear_profit_exit,
         strict=strict,
     )
+    reg_zoom = df_reg.reindex(px_zoom.index)
 
-# Align to zoom window
-reg_zoom = df_reg.reindex(px_zoom.index)
+# Normalize dtypes to strict booleans (avoids array/nested types)
+for col in ["bear_candidate", "bear_confirm"]:
+    if col in reg_zoom.columns:
+        reg_zoom[col] = reg_zoom[col].astype(bool)
 
-# --- close series (last N years) ---
+# ========================= ARIMA baseline on OHLCV (last N years) =========================
+ohlcv = fetch_ohlcv_last_years(ticker, years=zoom_years)
+if ohlcv.empty:
+    st.error("Could not fetch OHLCV for ARIMA baseline. Try rerunning.")
+    st.stop()
+
+base     = base_forecast_close_arima(ohlcv, order=(p, d, q))     # Series
+base     = pd.Series(base, index=base.index, dtype="float64")
+px_zoom  = px_zoom.reindex(base.index)                           # align views to base
+reg_zoom = reg_zoom.reindex(base.index)
+
+# Final alignment cleanup
 close = _clean_series(px_zoom["Close"])
-
-if close.empty:
-    st.error("No TSLA close data available in the zoom window. Try rerunning.")
-    st.stop()
-
-# --- Build ARIMA baseline from last-N-years OHLCV ---
-ohlcv = fetch_ohlcv_last_years("TSLA", years=zoom_years)
-base  = base_forecast_close_arima(ohlcv, order=(p, d, q))
-
-# Align everything to a common index (prevents empty plots)
-common_idx = px_zoom.index.intersection(base.index)
-if "bear_candidate" in reg_zoom.columns or "bear_confirm" in reg_zoom.columns:
-    reg_zoom = reg_zoom.reindex(common_idx)
-
-px_zoom  = px_zoom.reindex(common_idx)
-base     = base.reindex(common_idx)
-close_al = px_zoom["Close"].astype(float)
-
-# pass the aligned close + base into your bias layer function
-final, bias = apply_regime_bias(
-    base=base, close=close_al, regime_df=reg_zoom,
-    vol_span=vol_span, bull_k=bull_k,
-    bear_k_conf=bear_k_conf, bear_k_cand=bear_k_cand,
-)
-
-final = _clean_series(final)
-# align final as well (so all three share same non-NaN timeline)
 close, base = _align_like(close, base)
-close, final = _align_like(close, final)
 
-# guardrails so the chart never draws “nothing”
-if min(len(close), len(base), len(final)) < 5:
-    st.warning("Not enough aligned points to plot (data became empty after cleaning/alignment).")
-    st.write(
-        "Debug sizes — close:", len(close),
-        "base:", len(base),
-        "final:", len(final)
-    )
-    st.stop()
-
-
-# --------- Build base forecast + regime bias ----------
-base = base_forecast_close(px_zoom["Close"].squeeze(), horizon=5)
+# ========================= Regime-aware bias =========================
 final, bias = apply_regime_bias(
-    base=base.squeeze(),
-    close=px_zoom["Close"].squeeze(),
+    base=base,
+    close=close,
     regime_df=reg_zoom,
     vol_span=vol_span,
     bull_k=bull_k,
@@ -247,144 +220,78 @@ final, bias = apply_regime_bias(
     bear_k_cand=bear_k_cand,
 )
 
+# Align all three to the same index (and drop any residual NaNs)
+close, base = _align_like(close, base)
+close, final = _align_like(close, final)
 
-# --------- Plot: regimes + forecasts ----------
-def _segments(index, mask):
+if min(len(close), len(base), len(final)) < 5:
+    st.warning("Not enough aligned points to plot after cleaning/alignment.")
+    st.stop()
+
+# ========================= Plot =========================
+def _segments(index, mask_bool):
     out, start = [], None
-    for i, v in enumerate(mask):
-        if v and start is None: start = index[i]
-        if (not v) and (start is not None):
-            out.append((start, index[i-1])); start=None
-    if start is not None: out.append((start, index[-1]))
+    for i in range(len(index)):
+        m = bool(mask_bool[i])
+        if m and start is None:
+            start = index[i]
+        elif (not m) and (start is not None):
+            out.append((start, index[i - 1])); start = None
+    if start is not None:
+        out.append((start, index[-1]))
     return out
 
-bear_cand = reg_zoom.get("bear_candidate", pd.Series(False, index=px_zoom.index)).astype(bool).values
-bear_conf = reg_zoom.get("bear_confirm",   pd.Series(False, index=px_zoom.index)).astype(bool).values
+bear_cand = reg_zoom.get("bear_candidate", pd.Series(False, index=close.index)).reindex(close.index).fillna(False).astype(bool).values
+bear_conf = reg_zoom.get("bear_confirm",   pd.Series(False, index=close.index)).reindex(close.index).fillna(False).astype(bool).values
+cand_only = bear_cand & (~bear_conf)
 
-ymin = float(px_zoom["Close"].min())*0.95
-ymax = float(px_zoom["Close"].max())*1.05
+ymin = float(close.min()) * 0.95
+ymax = float(close.max()) * 1.05
 
-# --- Plot (use cleaned & aligned series: close, base, final) ---
 fig = go.Figure()
+# background shading first (below lines)
+for s, e in _segments(close.index, cand_only):
+    fig.add_vrect(x0=s, x1=e, fillcolor="crimson", opacity=0.12, line_width=0, layer="below")
+for s, e in _segments(close.index, bear_conf):
+    fig.add_vrect(x0=s, x1=e, fillcolor="crimson", opacity=0.30, line_width=0, layer="below")
+
+# lines
 fig.add_trace(go.Scatter(
     x=close.index, y=close.values, name="Close",
-    mode="lines+markers", line=dict(width=1.8, color="#111"),
-    marker=dict(size=3)
+    mode="lines", line=dict(width=1.9, color="#111")
 ))
 fig.add_trace(go.Scatter(
-    x=base.index, y=base.values, name="Base forecast",
+    x=base.index, y=base.values, name=f"ARIMA({p},{d},{q}) base (one-step)",
     mode="lines", line=dict(width=2.0, dash="dash", color="#d62728")
 ))
-fig.add_trace(go.Scatter(          # <-- was go.ScatteR (typo)
+fig.add_trace(go.Scatter(
     x=final.index, y=final.values, name="Regime-aware forecast",
     mode="lines", line=dict(width=2.4, color="#1f77b4")
 ))
 
 fig.update_layout(
-    title="TSLA — Regime-aware forecast (last 3y; light=candidate, dark=confirmed)",
+    title=f"TSLA — Regime-aware forecast (last {zoom_years}y; light=candidate, dark=confirmed)",
     template="plotly_white",
-    height=520,
+    height=540,
     margin=dict(l=10, r=10, t=80, b=10),
     legend=dict(orientation="h", x=0, y=1.02, xanchor="left", yanchor="bottom"),
+    xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
+    yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)", range=[ymin, ymax]),
     hovermode="x unified",
 )
+
 st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-
-
 
 with st.expander("What’s happening here?", expanded=False):
     st.markdown(
         """
-**Base forecast** is a lightweight EMA-drift projection (purely demonstrative).
-We then add a **regime bias** that scales with recent volatility (σ):
+**Baseline:** ARIMA one-step-ahead projection on last-N-years daily **Close** (built from OHLCV).  
+**Bias:** We tilt that baseline using regime signals and recent volatility (σ):
 
-- **Bull/sideways** → bias = `+ bull_k × σ`  (nudges forecast up)  
-- **Bear (candidate)** → bias = `bear_k_cand × σ` (gentle down-bias)  
-- **Bear (confirmed)** → bias = `bear_k_conf × σ` (stronger down-bias)
+- **Bull/sideways** → bias ≈ `+ bull_k × σ` (gentle uplift)  
+- **Bear (candidate)** → bias ≈ `bear_k_cand × σ` (small downward tilt)  
+- **Bear (confirmed)** → bias ≈ `bear_k_conf × σ` (stronger downward tilt)
 
-This page is read-only: it **does not change** the underlying detection code or Home page.
+This page is read-only: it **does not change** the underlying detection code or the Home page.
         """
     )
-
-# ===================== Parameter explainer (bottom of page) =====================
-with st.container():
-    st.markdown("---")
-    st.subheader("Parameter explainer")
-
-    st.markdown("""
-**How to read this:** each knob says *what it does*, *when to nudge it up/down*, and a **TSLA-flavored example** so it’s easy to picture.
-
-### General (view)
-- **Zoom window (years)** – how many years you see in the plots.  
-  *Nudge:* Increase to show more history; decrease to zoom in on recent behavior.  
-  *TSLA tip:* 3y shows recent cycles without losing context.
-
-### HMM / Regime labeling (shared with the main app)
-- **HMM states (`n_components`)** – how many hidden market “modes” the HMM learns (e.g., calm-bull, high-vol bull, drawdown-bear).  
-  *Nudge:* Raise if one state mixes very different behavior; lower if two states look redundant.  
-  *TSLA tip:* 3–4 often separates “fast rising but noisy” from “true damage”.
-
-- **`k_forward` (days)** – a look-ahead used only while training to name states from future returns.  
-  *Nudge:* Larger = smoother, slower labels; smaller = faster, noisier labels.  
-  *TSLA tip:* 7–10 captures turns without over-reacting to one-day spikes.
-
-- **`ema_span` (days)** – smoothing applied to the bear-probability line before thresholds.  
-  *Nudge:* Raise to reduce whipsaws; lower to react faster.  
-  *TSLA tip:* ~20 keeps noise out but still catches regime changes within weeks.
-
-- **Bear enter / exit (`bear_enter`, `bear_exit`)** – probabilities that gate when a **bear candidate** starts and when a bear ends.  
-  *Nudge:* If you see too many false bears, raise **enter** or lower **exit**; if bears start too late, lower **enter** a touch.  
-  *TSLA tip:* 0.80 enter with 0.55 exit gives healthy hysteresis.
-
-- **Trend weakness (`mom_threshold`)** – requires **EMA20 below EMA100** by at least this fraction to *confirm* a bear.  
-  *Nudge:* Raise to demand a clearer down-trend; lower if bears aren’t confirming when they should.  
-  *Example:* 0.03 ≈ 3% gap (EMA20 under EMA100).
-
-- **Drawdown confirm (`ddown_threshold`)** – price must be this far under a recent peak to *confirm* a bear.  
-  *Nudge:* Raise to avoid shallow dips being called bear; lower to catch pullbacks earlier.  
-  *TSLA tip:* 0.15 (~15%) filters routine wobbles.
-
-- **Confirm days (bear) (`confirm_days`)** – how long weakness must persist to confirm bear.  
-  *Nudge:* Raise to avoid whipsaws; lower to react sooner.  
-  *TSLA tip:* ~7 days.
-
-- **Min run lengths (`min_bear_run`, `min_bull_run`)** – drop tiny islands shorter than these durations.  
-  *Nudge:* Raise to tidy labels; lower to show more micro-pockets.
-
-- **Bull confirmations (`bull_mom_threshold`, `confirm_days_bull`)** – ask for **EMA20 above EMA100** by this fraction and for at least N days before recognizing a bull pocket.  
-  *TSLA tip:* 0.01 and 2–3 days catch relief rallies without over-labeling.
-
-- **Bull drawdown exit (`bull_ddown_exit`)** – if the drawdown has healed to within this distance of the peak, exit bear even if probability lags.  
-  *Nudge:* Raise to exit bears earlier after strong recoveries.
-
-- **Gates at entry/exit**
-  - **`direction_gate`** – require weak recent returns **and** a real drawdown to *start* a bear (e.g., last 10-day return ≤ −1% and drawdown ≤ −3%).  
-  - **`trend_gate`** – only enter bear if price is already **below EMA100**.  
-  - **`trend_exit_cross`** (if present) – if price crosses **above EMA100** while in bear, exit.
-
-- **Entry filters** (if shown)
-  - **`entry_ret_lookback` / `entry_ret_thresh`** – recent return window and threshold to allow a bear entry (e.g., 10 days, −1%).  
-  - **`entry_ddown_thresh`** – minimum drawdown needed to allow bear entry.  
-  - **`bear_profit_exit`** – if price bounces X% from bear entry, force an early bear exit.
-
-### Bias layer (new on this page, for the regime-aware forecast)
-- **Volatility span (`vol_span`)** – EMA window used for a simple vol proxy. Higher span = smoother vol estimate.  
-  *Why it matters:* We dampen or amplify the forecast using both *regime* and *vol*.  
-
-- **Bias strength in bull (`bull_k`)** – how much to **tilt the base forecast up** during bull regimes.  
-  *Nudge:* Raise if bull periods under-predict; lower if they overshoot.  
-  *TSLA tip:* Start small (e.g., 0.15) and increase if your base model is conservative.
-
-- **Bias strength in confirmed bear (`bear_k_conf`)** – how much to **tilt the base forecast down** during confirmed bear.  
-  *Nudge:* Raise if confirmed bears still look too optimistic; lower if too pessimistic.
-
-- **Bias strength in candidate bear (`bear_k_cand`)** – gentler tilt while the bear is *only a candidate*.  
-  *Nudge:* Keep lower than `bear_k_conf` so candidates don’t dominate; lift slightly if candidates often turn into real bears.
-
-### What to tweak for different personalities
-- **Very volatile (TSLA-like):** keep `ema_span` ~20, `bear_enter` high (≈0.80), `bear_exit` well lower (≈0.55), require `mom_threshold` ≈3% and `ddown_threshold` ≈15%, `confirm_days` ~7, enable `direction_gate`. Use modest `bull_k`, stronger `bear_k_conf`, small `bear_k_cand`.  
-- **Steadier mega-caps:** relax confirms a bit (e.g., `mom_threshold` 1–2%, `ddown_threshold` 8–10%), fewer confirm days (~3–5), smaller min runs.  
-- **Choppy sideways:** lower `bear_enter`/raise `bear_exit` gap slightly and increase min runs to avoid label flip-flop; reduce bias strengths so forecast stays close to the base model.
-
-**Rule of thumb:** If you see too many false bears → raise `bear_enter`, `mom_threshold`, `ddown_threshold`, `confirm_days`; keep `direction_gate` on. If bears exit too late → lower `bear_exit` a bit, raise `bull_ddown_exit`, or turn on `trend_exit_cross`.
-""")
