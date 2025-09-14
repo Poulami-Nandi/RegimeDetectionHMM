@@ -1,6 +1,24 @@
 # streamlit_app/Home.py
 from __future__ import annotations
 
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  PURPOSE                                                                ║
+# ║  -------                                                                ║
+# ║  This Streamlit page renders three charts for TSLA:                     ║
+# ║    1) IPO→today Close with EMA20/EMA100                                  ║
+# ║    2) Last N years Close with EMA20/EMA100 (zoom view)                   ║
+# ║    3) Last N years "Regime" view with light (candidate) and dark         ║
+# ║       (confirmed) bear shading.                                          ║
+# ║                                                                          ║
+# ║  The page is intentionally resilient to small API differences in your   ║
+# ║  pipeline: it calls `detect_regimes(...)` via a flexible adapter and     ║
+# ║  falls back to simple inference for bear candidate/confirm masks if the  ║
+# ║  pipeline does not provide them directly.                                ║
+# ║                                                                          ║
+# ║  Note: This page is fixed to TSLA on purpose to make demo behavior       ║
+# ║  deterministic.                                                          ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
 # ===== stdlib =====
 import inspect
 from functools import wraps
@@ -12,12 +30,21 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-# --- make 'src' importable ---
+# ────────────────────────────────────────────────────────────────────────────
+# Import path setup
+# - Streamlit Cloud often runs the app from /mount/... and repo code lives
+#   one level up from `streamlit_app/`. We add that repo root to sys.path
+#   so `src.regime_detection` becomes importable.
+# ────────────────────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-# Friendly failure if src isn’t importable
+# ────────────────────────────────────────────────────────────────────────────
+# Pipeline import (with friendly failure)
+# If this import fails, we surface a helpful error that shows the repo root
+# Streamlit detected (useful when debugging deployment path issues).
+# ────────────────────────────────────────────────────────────────────────────
 try:
     from src.regime_detection import detect_regimes
 except Exception as e:
@@ -28,17 +55,28 @@ except Exception as e:
     )
     st.stop()
 
+# ────────────────────────────────────────────────────────────────────────────
+# Streamlit page configuration
+# ────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="TSLA Regime Detection — HMM + Rules",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ---------------- Sidebar ----------------
+# ===========================================================================#
+#                                SIDEBAR                                     #
+# ===========================================================================#
+# The app is locked to TSLA so other parts of the repo (e.g. a separate
+# page for model comparisons) can assume consistent data.
 st.title("TSLA Regime Detection — HMM + Human-Readable Rules (Crisp Zoom Charts)")
 st.sidebar.markdown("### Controls (fixed to TSLA)")
 ticker = "TSLA"
 
+# All knobs are surfaced here to mirror your Colab defaults and allow
+# quick experimentation. The detect_regimes adapter below tries multiple
+# parameter name aliases so your internal function can evolve without
+# breaking this UI.
 st.sidebar.markdown("### Regime knobs (defaults ~ Colab)")
 n_components        = st.sidebar.number_input("HMM states (n_components)", 2, 6, value=4, step=1)
 k_forward           = st.sidebar.slider("k_forward (days ahead for label)", 1, 20, value=10, step=1)
@@ -62,16 +100,34 @@ entry_ddown_thresh  = st.sidebar.slider("Entry drawdown threshold", -0.10, 0.10,
 bear_profit_exit    = st.sidebar.slider("Bear profit exit", 0.00, 0.20, value=0.05, step=0.005)
 zoom_years          = st.sidebar.slider("Zoom window (years)", 1, 10, value=3, step=1)
 
-# ---------------- helpers ----------------
+# ===========================================================================#
+#                              HELPERS (UI-safe)                             #
+# ===========================================================================#
+
 def _call_detect_regimes_flexible(func, **vals):
-    """Map our values to whatever parameter names `detect_regimes` supports."""
+    """
+    Adapter that maps the page's knob names to whatever the current
+    `detect_regimes` signature expects. This protects the page from
+    minor API changes (e.g., renamed args) by trying several aliases.
+
+    Returns
+    -------
+    (df, model) : tuple
+        We normalize to `(df, model)` even if the underlying function
+        returns only a DataFrame (in which case model=None).
+    """
     sig = inspect.signature(func)
     params = set(sig.parameters.keys())
     out = {}
+
     def put(names, value):
+        # Assign value to the first matching parameter name in `names`
         for name in names:
             if name in params:
-                out[name] = value; return
+                out[name] = value
+                return
+
+    # Core / common names + aliases used in earlier iterations of the pipeline
     put(["ticker"],                 vals.get("ticker"))
     put(["start"],                  vals.get("start"))
     put(["end"],                    vals.get("end"))
@@ -95,10 +151,16 @@ def _call_detect_regimes_flexible(func, **vals):
     put(["entry_ddown_thresh","entry_dd_thr"],   vals.get("entry_ddown_thresh"))
     put(["bear_profit_exit","profit_exit"],      vals.get("bear_profit_exit"))
     put(["strict"],                 vals.get("strict"))
+
     res = func(**out)
     return res if isinstance(res, tuple) else (res, None)
 
+
 def _ensure_emas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Guarantee EMA columns exist (ema20, ema100) even if the pipeline
+    does not return them. Keeps the plotting code simple and robust.
+    """
     if df is None or df.empty:
         return df
     if "Close" in df:
@@ -108,50 +170,77 @@ def _ensure_emas(df: pd.DataFrame) -> pd.DataFrame:
             df["ema100"] = df["Close"].ewm(span=100, adjust=False).mean()
     return df
 
+
 def _last_years(df: pd.DataFrame, years: int) -> pd.DataFrame:
-    if df.empty: return df
+    """
+    Slice the *tail* of a DataFrame to the last `years` worth of rows
+    using the DateTimeIndex. Returns a copy.
+    """
+    if df.empty:
+        return df
     end = df.index.max()
     start = end - pd.DateOffset(years=years)
     return df.loc[df.index >= start].copy()
 
+
 def _try_get_prob_series(df: pd.DataFrame) -> pd.Series | None:
-    """Pick a 'bear probability'-like column if present."""
+    """
+    Best-effort search for a “bear probability” series if the pipeline
+    exposes one under a non-standard name. We look for any column that
+    contains "prob" and "bear" (case-insensitive) and cast to float.
+    """
     candidates = [c for c in df.columns if "prob" in c.lower() and "bear" in c.lower()]
     if candidates:
         s = pd.to_numeric(df[candidates[0]], errors="coerce")
         return s.astype(float)
     return None
 
+
 def _infer_bear_masks(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """
-    Return (bear_candidate, bear_confirm) as boolean Series aligned to df.index.
-    - If pipeline provides them, use those.
-    - Else, build candidate from a 'bear_prob' column if available.
-    - Else, set candidates False.
-    - Confirmed = candidate & (EMA20 below EMA100 by mom_threshold) & (drawdown >= ddown_threshold)
+    Construct (bear_candidate, bear_confirm) as boolean Series aligned to
+    df.index, **only if** the pipeline didn’t provide them.
+
+    Candidate:
+      - If `bear_candidate` exists, use it directly.
+      - Else, use an EMA-smoothed bear probability and compare to `bear_enter`.
+
+    Confirmed:
+      - Candidate & (EMA20 below EMA100 by `mom_threshold`)
+                 & (drawdown ≤ -`ddown_threshold`)
+      - We apply a short run-length filter so isolated single-day spikes
+        don’t appear as confirmed.
+
+    Returns
+    -------
+    (cand, conf): tuple[pd.Series, pd.Series]
     """
     idx = df.index
     cand = pd.Series(False, index=idx)
 
-    if "bear_candidate" in df:  # exact column
+    # Prefer explicitly provided mask from the pipeline
+    if "bear_candidate" in df:
         cand = pd.Series(df["bear_candidate"], index=idx).fillna(False).astype(bool)
     else:
         p = _try_get_prob_series(df)
         if p is not None:
+            # hysteresis *entry* proxy when no explicit candidate mask is given
             cand = (p.ewm(span=ema_span, adjust=False).mean() >= bear_enter).reindex(idx).fillna(False)
 
-    # ensure EMAs for confirmation rule
+    # Ensure EMAs exist for confirmation rules
     tmp = _ensure_emas(df.copy())
+
+    # Trend: EMA20 under EMA100 by at least mom_threshold (as a fraction)
     ema_ok = (tmp["ema20"] < tmp["ema100"] * (1 - mom_threshold)).reindex(idx).fillna(False)
 
-    # simple drawdown rule
+    # Drawdown: distance from rolling peak must exceed ddown_threshold
     rolling_peak = tmp["Close"].cummax()
     dd = (tmp["Close"] / rolling_peak - 1.0).reindex(idx)
     dd_ok = (dd <= -ddown_threshold).fillna(False)
 
     conf = (cand & ema_ok & dd_ok)
 
-    # respect min run lengths
+    # Lightweight run-length pruning to keep charts clean
     def _min_run_filter(mask: pd.Series, min_len: int) -> pd.Series:
         mask = mask.astype(bool).copy()
         run_id = (mask != mask.shift()).cumsum()
@@ -165,7 +254,12 @@ def _infer_bear_masks(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     conf = _min_run_filter(conf, max(1, min_bear_run // 2))
     return cand.astype(bool), conf.astype(bool)
 
+
 def _segments(index, mask_bool):
+    """
+    Utility for shading: convert a boolean mask into contiguous
+    (start, end) tuples in index space.
+    """
     out, start = [], None
     arr = mask_bool.values if hasattr(mask_bool, "values") else mask_bool
     for i, v in enumerate(arr):
@@ -178,12 +272,21 @@ def _segments(index, mask_bool):
         out.append((start, index[-1]))
     return out
 
-def _add_vbands(fig, idx, mask_bool, color, opacity, y0, y1):
-    for s, e in _segments(idx, mask_bool):
-        fig.add_vrect(x0=s, x1=e, fillcolor=color, opacity=opacity,
-                      line_width=0, layer="below", y0=y0, y1=y1)
 
-# ---------------- Run pipeline once (and use it everywhere) ----------------
+def _add_vbands(fig, idx, mask_bool, color, opacity, y0, y1):
+    """
+    Add vertical background rectangles to `fig` anywhere `mask_bool` is True.
+    We paint them on the 'below' layer so the price lines stay visible.
+    """
+    for s, e in _segments(idx, mask_bool):
+        fig.add_vrect(
+            x0=s, x1=e, fillcolor=color, opacity=opacity,
+            line_width=0, layer="below", y0=y0, y1=y1
+        )
+
+# ===========================================================================#
+#                     RUN PIPELINE (ONCE) AND PLOT                           #
+# ===========================================================================#
 with st.spinner("Running regime pipeline (TSLA)…"):
     df, _ = _call_detect_regimes_flexible(
         detect_regimes,
@@ -201,17 +304,21 @@ with st.spinner("Running regime pipeline (TSLA)…"):
         strict=strict,
     )
 
+# Defensive checks: if the pipeline returns an empty DF or without 'Close',
+# there is nothing to plot.
 if df is None or df.empty or "Close" not in df.columns:
     st.error("Pipeline returned no data or missing 'Close'.")
     st.stop()
 
+# Sort, backfill EMAs (if missing) and create a zoom slice for the second/third charts
 df = df.sort_index()
 df = _ensure_emas(df)
-
-# --------- Charts 1 & 2 use pipeline output (never empty) ----------
 px_full = df[["Close","ema20","ema100"]].copy()
 px_zoom = _last_years(px_full, zoom_years)
 
+# ────────────────────────────────────────────────────────────────────────────
+# Basic price+EMA plotting helper
+# ────────────────────────────────────────────────────────────────────────────
 def _plot_close_emas(df_plot: pd.DataFrame, title: str, h=440) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Close"], name="Close",
@@ -231,28 +338,39 @@ def _plot_close_emas(df_plot: pd.DataFrame, title: str, h=440) -> go.Figure:
     )
     return fig
 
+# 1) Full history (IPO→today) — uses pipeline output to avoid a second Yahoo call
 fig1 = _plot_close_emas(px_full, "TSLA — Close with EMA20 / EMA100 (IPO → today)")
 st.plotly_chart(fig1, use_container_width=True, theme="streamlit")
 
+# 2) Last-N-years zoom slice
 fig2 = _plot_close_emas(px_zoom, f"TSLA — Close with EMA20 / EMA100 (last {zoom_years} years)")
 st.plotly_chart(fig2, use_container_width=True, theme="streamlit")
 
-# --------- Regime view with guaranteed masks ----------
+# ────────────────────────────────────────────────────────────────────────────
+# 3) Regime view (zoom window) with shading
+#    - We prefer pipeline-provided masks: 'bear_candidate' + 'bear_confirm'
+#    - Else we infer from probability + trend/drawdown rules
+# ────────────────────────────────────────────────────────────────────────────
 reg_zoom = px_zoom.copy()
-# Use provided masks if present, else infer robustly
+
 if ("bear_candidate" in df.columns) or ("bear_confirm" in df.columns):
+    # Use masks if the pipeline already computed them
     bear_cand = pd.Series(df.get("bear_candidate", False), index=df.index).astype(bool)
     bear_conf = pd.Series(df.get("bear_confirm",   False), index=df.index).astype(bool)
 else:
+    # Otherwise, build them with a deterministic fallback
     bear_cand, bear_conf = _infer_bear_masks(df)
 
+# Align masks to the zoom view and compute candidate-only (no double shading)
 bear_cand = bear_cand.reindex(reg_zoom.index).fillna(False)
 bear_conf = bear_conf.reindex(reg_zoom.index).fillna(False)
 cand_only = (bear_cand & (~bear_conf))
 
+# Y-limits for translucent vrect bands
 ymin = float(reg_zoom["Close"].min()) * 0.95
 ymax = float(reg_zoom["Close"].max()) * 1.05
 
+# Plot close + EMAs, then add light/dark red shading
 fig_reg = go.Figure()
 fig_reg.add_trace(go.Scatter(x=reg_zoom.index, y=reg_zoom["Close"],  name="Close",
                              mode="lines", line=dict(width=2.0, color="#111")))
@@ -261,10 +379,11 @@ fig_reg.add_trace(go.Scatter(x=reg_zoom.index, y=reg_zoom["ema20"], name="EMA20"
 fig_reg.add_trace(go.Scatter(x=reg_zoom.index, y=reg_zoom["ema100"], name="EMA100",
                              mode="lines", line=dict(width=1.6, color="#2ca02c")))
 
-# shading: light = candidate-only, dark = confirmed
+# Shading: light = candidate-only, dark = confirmed (below lines)
 _add_vbands(fig_reg, reg_zoom.index, cand_only, "crimson", 0.12, ymin, ymax)
 _add_vbands(fig_reg, reg_zoom.index, bear_conf, "crimson", 0.30, ymin, ymax)
 
+# Build a compact parameter string for the subtitle (helps reproduce settings)
 params_str = (
     f"k_fwd={k_forward}, EMA={ema_span}, enter={bear_enter:.2f}, exit={bear_exit:.2f}, "
     f"min_bear={min_bear_run}, min_bull={min_bull_run}, mom_thr={mom_threshold:.2f}, "
@@ -289,4 +408,5 @@ fig_reg.update_layout(
 )
 st.plotly_chart(fig_reg, use_container_width=True, theme="streamlit")
 
+# Footer reminder (compliance / demo clarity)
 st.caption("Author: Dr. Poulami Nandi · Research demo only. Not investment advice.")
