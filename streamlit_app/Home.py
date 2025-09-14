@@ -351,39 +351,112 @@ st.plotly_chart(fig2, use_container_width=True, theme="streamlit")
 #    - We prefer pipeline-provided masks: 'bear_candidate' + 'bear_confirm'
 #    - Else we infer from probability + trend/drawdown rules
 # ────────────────────────────────────────────────────────────────────────────
-reg_zoom = px_zoom.copy()
+# --------- Regime view with guaranteed masks + rich debug ----------
 
-if ("bear_candidate" in df.columns) or ("bear_confirm" in df.columns):
-    # Use masks if the pipeline already computed them
-    bear_cand = pd.Series(df.get("bear_candidate", False), index=df.index).astype(bool)
-    bear_conf = pd.Series(df.get("bear_confirm",   False), index=df.index).astype(bool)
+# 1) narrow to the zoom window using your pipeline output (guarantees EMAs exist earlier)
+px_full = df[["Close", "ema20", "ema100"]].copy()
+px_zoom = _last_years(px_full, zoom_years)
+
+# Helper: contiguous True segments
+def _segments(index, mask_bool):
+    out, start = [], None
+    arr = mask_bool.values if hasattr(mask_bool, "values") else mask_bool
+    for i, v in enumerate(arr):
+        v = bool(v)
+        if v and start is None:
+            start = index[i]
+        elif (not v) and (start is not None):
+            out.append((start, index[i-1])); start = None
+    if start is not None:
+        out.append((start, index[-1]))
+    return out
+
+# Helper: small-run cleaner
+def _min_run_filter(mask: pd.Series, min_len: int) -> pd.Series:
+    mask = pd.Series(mask, index=mask.index, dtype=bool)
+    run_id = (mask != mask.shift()).cumsum()
+    kept = mask.copy()
+    for _, seg in mask.groupby(run_id):
+        if seg.iloc[0] and len(seg) < min_len:
+            kept.loc[seg.index] = False
+    return kept
+
+# Helper: robustly infer candidate/confirm if they’re missing/empty
+def _infer_bear_masks(df_all: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    idx = df_all.index
+
+    # try to locate a "bear probability" column (common names)
+    prob_cols = [c for c in df_all.columns if "bear" in c.lower() and "prob" in c.lower()]
+    if prob_cols:
+        p_bear = pd.to_numeric(df_all[prob_cols[0]], errors="coerce").astype(float)
+    elif "p_bear" in df_all.columns:
+        p_bear = pd.to_numeric(df_all["p_bear"], errors="coerce").astype(float)
+    else:
+        # last resort — if model exposed per-state posts, add your own mapping as needed
+        p_bear = pd.Series(index=idx, dtype=float)
+
+    p_bear_ema = p_bear.ewm(span=ema_span, adjust=False).mean()
+
+    # Candidate: smoothed probability crosses enter threshold
+    cand = (p_bear_ema >= bear_enter).reindex(idx).fillna(False)
+
+    # Confirmation: require both trend + drawdown
+    ema_ok = (df_all["ema20"] < df_all["ema100"] * (1 - mom_threshold)).reindex(idx).fillna(False)
+    # drawdown (≤0). If your features include one, prefer that; else compute quick local version:
+    if "drawdown" in df_all.columns:
+        dd = pd.to_numeric(df_all["drawdown"], errors="coerce")
+    else:
+        dd = (df_all["Close"] / df_all["Close"].cummax() - 1.0)
+    dd_ok = (dd <= -ddown_threshold).fillna(False)
+
+    conf = (cand & ema_ok & dd_ok)
+
+    # Run-length hygiene
+    cand_f = _min_run_filter(cand, min_bear_run)
+    conf_f = _min_run_filter(conf, max(1, min_bear_run // 2))
+
+    return cand_f.astype(bool), conf_f.astype(bool), p_bear, p_bear_ema
+
+# 2) Choose masks: prefer pipeline’s if present/non-empty; otherwise use inferred
+bear_cand_raw = pd.Series(df.get("bear_candidate", False), index=df.index).astype(bool)
+bear_conf_raw = pd.Series(df.get("bear_confirm",   False), index=df.index).astype(bool)
+have_pipe_masks = bear_cand_raw.any() or bear_conf_raw.any()
+
+cand_inf, conf_inf, p_bear, p_bear_ema = _infer_bear_masks(df)
+
+if have_pipe_masks:
+    bear_cand = bear_cand_raw
+    bear_conf = bear_conf_raw
 else:
-    # Otherwise, build them with a deterministic fallback
-    bear_cand, bear_conf = _infer_bear_masks(df)
+    bear_cand = cand_inf
+    bear_conf = conf_inf
 
-# Align masks to the zoom view and compute candidate-only (no double shading)
-bear_cand = bear_cand.reindex(reg_zoom.index).fillna(False)
-bear_conf = bear_conf.reindex(reg_zoom.index).fillna(False)
+# 3) Reindex masks to zoom window & build candidate-only view
+bear_cand = bear_cand.reindex(px_zoom.index).fillna(False)
+bear_conf = bear_conf.reindex(px_zoom.index).fillna(False)
 cand_only = (bear_cand & (~bear_conf))
 
-# Y-limits for translucent vrect bands
-ymin = float(reg_zoom["Close"].min()) * 0.95
-ymax = float(reg_zoom["Close"].max()) * 1.05
+# 4) Third plot: TSLA + EMAs + shading
+ymin = float(px_zoom["Close"].min()) * 0.95
+ymax = float(px_zoom["Close"].max()) * 1.05
 
-# Plot close + EMAs, then add light/dark red shading
 fig_reg = go.Figure()
-fig_reg.add_trace(go.Scatter(x=reg_zoom.index, y=reg_zoom["Close"],  name="Close",
+fig_reg.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["Close"],  name="Close",
                              mode="lines", line=dict(width=2.0, color="#111")))
-fig_reg.add_trace(go.Scatter(x=reg_zoom.index, y=reg_zoom["ema20"], name="EMA20",
+fig_reg.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["ema20"], name="EMA20",
                              mode="lines", line=dict(width=1.6, color="#ff7f0e")))
-fig_reg.add_trace(go.Scatter(x=reg_zoom.index, y=reg_zoom["ema100"], name="EMA100",
+fig_reg.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["ema100"], name="EMA100",
                              mode="lines", line=dict(width=1.6, color="#2ca02c")))
 
-# Shading: light = candidate-only, dark = confirmed (below lines)
-_add_vbands(fig_reg, reg_zoom.index, cand_only, "crimson", 0.12, ymin, ymax)
-_add_vbands(fig_reg, reg_zoom.index, bear_conf, "crimson", 0.30, ymin, ymax)
+def _add_vbands(fig, idx, mask_bool, color, opacity, y0, y1):
+    for s, e in _segments(idx, mask_bool):
+        fig.add_vrect(x0=s, x1=e, fillcolor=color, opacity=opacity,
+                      line_width=0, layer="below", y0=y0, y1=y1)
 
-# Build a compact parameter string for the subtitle (helps reproduce settings)
+# 4-color scheme readiness (bear now; bull not drawn in this file)
+_add_vbands(fig_reg, px_zoom.index, cand_only, "crimson", 0.12, ymin, ymax)  # candidate bear (light red)
+_add_vbands(fig_reg, px_zoom.index, bear_conf, "crimson", 0.30, ymin, ymax)  # confirmed bear (dark red)
+
 params_str = (
     f"k_fwd={k_forward}, EMA={ema_span}, enter={bear_enter:.2f}, exit={bear_exit:.2f}, "
     f"min_bear={min_bear_run}, min_bull={min_bull_run}, mom_thr={mom_threshold:.2f}, "
@@ -394,7 +467,6 @@ params_str = (
     f"entry_dd_thr={entry_ddown_thresh:.2f}, trend_gate={trend_gate}, "
     f"profit_exit={bear_profit_exit:.2f}, strict={strict}"
 )
-
 fig_reg.update_layout(
     title=dict(text=f"TSLA — Regimes (last {zoom_years} years; light=candidate, dark=confirmed)<br>"
                     f"<sup>{params_str}</sup>", pad=dict(b=26)),
@@ -407,6 +479,61 @@ fig_reg.update_layout(
     hovermode="x unified",
 )
 st.plotly_chart(fig_reg, use_container_width=True, theme="streamlit")
+
+# 5) Debug UI (toggle in sidebar)
+show_debug = st.sidebar.checkbox("Debug mode (regimes)", value=False)
+
+if show_debug:
+    st.markdown("### Regime debug")
+    with st.expander("Input/columns snapshot", expanded=True):
+        st.write({
+            "df.shape": df.shape,
+            "index.range": f"{df.index.min()} → {df.index.max()}",
+            "has_bear_candidate": bool("bear_candidate" in df.columns),
+            "has_bear_confirm": bool("bear_confirm" in df.columns),
+            "any(bear_candidate)": bool(bear_cand_raw.any()),
+            "any(bear_confirm)":  bool(bear_conf_raw.any()),
+            "used_pipeline_masks": bool(have_pipe_masks),
+        })
+        st.write("Columns:", list(df.columns)[:40])
+
+    # Show counts on the zoom index (final masks used for shading)
+    with st.expander("Mask counts on the zoom window", expanded=True):
+        st.write({
+            "candidate_used.sum": int(bear_cand.sum()),
+            "confirmed_used.sum": int(bear_conf.sum()),
+            "candidate_inferred.sum": int(cand_inf.reindex(px_zoom.index).fillna(False).sum()),
+            "confirmed_inferred.sum": int(conf_inf.reindex(px_zoom.index).fillna(False).sum()),
+        })
+
+    # p_bear line and thresholds — this explains “why nothing shades”
+    if not p_bear.empty:
+        pz = p_bear.reindex(px_zoom.index)
+        pz_ema = p_bear_ema.reindex(px_zoom.index)
+        fig_prob = go.Figure()
+        fig_prob.add_trace(go.Scatter(x=pz.index, y=pz.values, name="p_bear", mode="lines"))
+        fig_prob.add_trace(go.Scatter(x=pz_ema.index, y=pz_ema.values, name=f"EMA({ema_span})", mode="lines"))
+        # Enter / Exit levels (horizontal lines for context)
+        if not pd.isna(bear_enter):
+            fig_prob.add_hline(y=bear_enter, line=dict(width=1, dash="dash"), annotation_text="enter", annotation_position="top left")
+        if not pd.isna(bear_exit):
+            fig_prob.add_hline(y=bear_exit, line=dict(width=1, dash="dot"), annotation_text="exit", annotation_position="bottom left")
+        fig_prob.update_layout(height=260, template="plotly_white", title="Bear probability (raw & EMA)")
+        st.plotly_chart(fig_prob, use_container_width=True)
+
+    # List start/end of shaded intervals for the plot you’re looking at
+    def _seg_rows(mask: pd.Series, label: str):
+        rows = []
+        for s, e in _segments(mask.index, mask.values):
+            rows.append({"type": label, "start": s, "end": e, "days": (e - s).days + 1})
+        return rows
+
+    seg_rows = _seg_rows(cand_only, "bear_candidate_only") + _seg_rows(bear_conf, "bear_confirm")
+    seg_df = pd.DataFrame(seg_rows)
+    if seg_df.empty:
+        st.info("No segments found in the zoom window. If you expect bears, lower `bear_enter`, decrease `ema_span`, or reduce `min_bear_run`.")
+    else:
+        st.dataframe(seg_df, use_container_width=True)
 
 # Footer reminder (compliance / demo clarity)
 st.caption("Author: Dr. Poulami Nandi · Research demo only. Not investment advice.")
