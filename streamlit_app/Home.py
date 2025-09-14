@@ -561,20 +561,6 @@ seg_df.to_csv(out_csv, index=False)
 st.caption(f"Saved confirmed segments (last {zoom_years}y) → `{out_csv}`")
 
 # ======================= PLOTLY: TSLA regimes (last 3y) =======================
-def _segments(index, mask_bool):
-    """Return [(start_ts, end_ts), ...] of contiguous True runs."""
-    out, start = [], None
-    for i in range(len(index)):
-        m = bool(mask_bool[i])
-        if m and start is None:
-            start = index[i]
-        elif (not m) and (start is not None):
-            out.append((start, index[i - 1]))
-            start = None
-    if start is not None:
-        out.append((start, index[-1]))
-    return out
-
 def _add_bear_shading(fig, index, mask_bool, y0, y1, opacity):
     for s, e in _segments(index, mask_bool):
         fig.add_shape(
