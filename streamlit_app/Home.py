@@ -85,7 +85,7 @@ ddown_threshold     = st.sidebar.slider("Drawdown threshold", 0.00, 0.30, value=
 confirm_days        = st.sidebar.slider("Confirm days (bear)", 0, 20, value=7, step=1)
 min_bear_run        = st.sidebar.slider("Min bear run (days)", 1, 60, value=15, step=1)
 
-st.sidebar.subheader("Confirmers (bull) — re-exposed")
+st.sidebar.subheader("Confirmers (bull)")
 # ← You asked to expose these two again so you can shape bull runs.
 confirm_days_bull   = st.sidebar.slider("Confirm days (bull)", 0, 10, value=3, step=1)
 min_bull_run        = st.sidebar.slider("Min bull run (days)", 1, 60, value=5, step=1)
