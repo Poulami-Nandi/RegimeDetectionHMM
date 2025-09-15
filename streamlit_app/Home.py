@@ -219,10 +219,6 @@ if df is None or df.empty or "Close" not in df.columns:
 
 df = _ensure_emas(df.sort_index())
 
-
-# --- Full-history Close strictly from Yahoo ---
-import yfinance as yf
-
 # --- Full-history Close strictly from Yahoo (robust, with fallback) ---
 import yfinance as yf
 
