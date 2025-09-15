@@ -141,24 +141,21 @@ The pipeline consists of the following steps:
 ---
 ## Results and Visualizations
 The following figures illustrate regime detection and forecasts for Tesla (TSLA) over the last 3 years.
+![Tesla regimes over last 3 years](https://github.com/Poulami-Nandi/RegimeDetectionHMM/blob/main/docs/images/tsla_regimes_last3y_shading.png)  
 
 ## Regime-aware forecast vs baseline ARIMA
 Baseline ARIMA(1,1,1) one-step forecast compared with regime-aware forecast.
-
----
-
-## Detected regimes (green = bull, red = bear)
-Shaded regions show candidate vs confirmed phases.
-
+![Regime-aware forecast vs baseline ARIMA for Tesla over last 3 years](https://github.com/Poulami-Nandi/RegimeDetectionHMM/blob/main/docs/images/tsla_regime_forecast_last3y.png)  
 
 ## Close with EMA overlays
 TSLA closing price with EMA20 (fast) and EMA100 (slow).
+![Testa with Closing price and EMAs](https://github.com/Poulami-Nandi/RegimeDetectionHMM/blob/main/docs/images/tsla_close_ema_last3y.png)  
 
 ---
 
 ## Streamlit Dashboard
 A demonstration dashboard is deployed with Streamlit, focused on TSLA as a volatile test case:
-Live demo on Streamlit Cloud
+[Streamlit app link for regime detection with Tesla](https://regimedetectionhmm-mkn4ypczlw7vojrqr95bwp.streamlit.app/)
 Features include:
 - Toggleable parameters (confirmation persistence, thresholds, gates).
 - Visual regime overlays and tables of confirmed bull/bear runs.
