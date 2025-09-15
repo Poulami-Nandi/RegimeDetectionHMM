@@ -57,14 +57,14 @@ st.title("Regime-aware Price Forecast — TSLA (add-on demo)")
 st.caption("This page is additive. It reuses the existing pipeline and does not modify the original app.")
 
 # ---------------- Sidebar ----------------
-st.sidebar.header("Controls (TSLA demo)")
+st.sidebar.header("Controls")
 ticker = "TSLA"
 # How many calendar years to show (and to fetch OHLCV for ARIMA).
-zoom_years = st.sidebar.slider("Zoom window (years)", 1, 10, 3, 1)
+zoom_years = 3
 
 # These are passed straight to your pipeline. Defaults mirror your Home page.
-st.sidebar.subheader("Regime knobs (same defaults)")
-n_components        = st.sidebar.number_input("HMM states", 2, 6, 4, 1)
+st.sidebar.subheader("Regime configuration")
+n_components        = 4 #HMM states
 k_forward           = st.sidebar.slider("k_forward", 1, 20, 10, 1)
 ema_span            = st.sidebar.slider("ema_span", 5, 60, 20, 1)
 bear_enter          = st.sidebar.slider("bear_enter", 0.50, 0.99, 0.80, 0.01)
