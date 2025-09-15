@@ -225,26 +225,50 @@ import yfinance as yf
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_close_full(ticker: str) -> pd.DataFrame:
     try:
-        raw = yf.download(ticker, period="max", interval="1d", auto_adjust=True, progress=False)
+        raw = yf.download(
+            ticker,
+            period="max",
+            interval="1d",
+            auto_adjust=True,   # we want 'Close' to be adjusted
+            group_by="ticker",  # yfinance may create a MultiIndex with ticker on top
+            progress=False
+        )
     except Exception:
         return pd.DataFrame()
 
     if raw is None or raw.empty:
         return pd.DataFrame()
 
-    # Ensure tz-naive DateTimeIndex
+    # Normalize index (tz-naive, datetime)
     if getattr(raw.index, "tz", None) is not None:
         raw.index = raw.index.tz_localize(None)
-    try:
-        raw.index = pd.to_datetime(raw.index)
-    except Exception:
-        pass
+    raw.index = pd.to_datetime(raw.index, errors="coerce")
 
-    out = raw.filter(items=["Close"]).dropna().copy()
+    # If MultiIndex columns (e.g., ('TSLA','Close')), slice to the ticker level
+    if isinstance(raw.columns, pd.MultiIndex):
+        try:
+            raw = raw.xs(ticker, axis=1, level=0)  # take the subframe for this ticker
+        except Exception:
+            # As a fallback, drop the top level if there's only one
+            if len(raw.columns.levels[0]) == 1:
+                raw.columns = raw.columns.droplevel(0)
+            else:
+                # Can't resolve -> return empty so we'll fall back to pipeline later
+                return pd.DataFrame()
+
+    # Now expect flat columns with 'Close'
+    if "Close" not in raw.columns:
+        # Some environments only have 'Adj Close' even with auto_adjust=True
+        if "Adj Close" in raw.columns:
+            raw = raw.rename(columns={"Adj Close": "Close"})
+        else:
+            return pd.DataFrame()
+
+    out = raw[["Close"]].dropna().copy()
     if out.empty:
         return out
 
-    # EMAs used only for price panels
+    # Add EMAs used by price panels
     out["ema20"]  = out["Close"].ewm(span=20,  adjust=False).mean()
     out["ema100"] = out["Close"].ewm(span=100, adjust=False).mean()
     return out
@@ -255,29 +279,46 @@ px_full = _fetch_close_full(ticker)
 if px_full is None or px_full.empty:
     px_full = df[["Close", "ema20", "ema100"]].dropna().copy()
 
-# Safety: sort, coerce index → datetime
+# Safety: sort, ensure DateTimeIndex
 px_full = px_full.sort_index()
 if not isinstance(px_full.index, pd.DatetimeIndex):
     px_full.index = pd.to_datetime(px_full.index, errors="coerce")
-px_full = px_full[~px_full.index.isna()]
+px_full = px_full.loc[~px_full.index.isna()]
 
-# In case of truncated cache
+# ▶️ Auto-heal truncated cache: if first date is suspiciously recent, clear cache and refetch
 try:
     if not px_full.empty and (px_full.index.min() > pd.Timestamp("2012-01-01")):
-        # Cached data is suspiciously recent → clear cache and refetch once
         st.cache_data.clear()
         px_full = _fetch_close_full(ticker).sort_index()
         if not isinstance(px_full.index, pd.DatetimeIndex):
             px_full.index = pd.to_datetime(px_full.index, errors="coerce")
-        px_full = px_full[~px_full.index.isna()]
+        px_full = px_full.loc[~px_full.index.isna()]
 except Exception:
     pass
+
+# Ensure required columns exist even after fallbacks
+if "Close" not in px_full.columns:
+    # Last-ditch: if we somehow have 'Adj Close'
+    if "Adj Close" in px_full.columns:
+        px_full = px_full.rename(columns={"Adj Close": "Close"})
+    else:
+        # Use pipeline close as a rescue
+        if "Close" in df.columns:
+            px_full["Close"] = df["Close"]
+        else:
+            st.error("Could not locate a 'Close' column for plotting.")
+            st.stop()
+
+for ema_col, span in (("ema20", 20), ("ema100", 100)):
+    if ema_col not in px_full.columns:
+        px_full[ema_col] = px_full["Close"].ewm(span=span, adjust=False).mean()
 
 # Build zoom slice (handle edge case: very short history)
 cutoff = px_full.index.max() - pd.DateOffset(years=ZOOM_YEARS_FIXED)
 px_zoom = px_full.loc[px_full.index >= cutoff].copy()
 if px_zoom.empty:
     px_zoom = px_full.tail(750).copy()
+
 
 def _plot_close_emas(dfp: pd.DataFrame, title: str, h=440) -> go.Figure:
     fig = go.Figure()
