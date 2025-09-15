@@ -223,28 +223,76 @@ df = _ensure_emas(df.sort_index())
 # --- Full-history Close strictly from Yahoo ---
 import yfinance as yf
 
+# --- Full-history Close strictly from Yahoo (robust, with fallback) ---
+import yfinance as yf
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_close_full(ticker: str) -> pd.DataFrame:
-    raw = yf.download(ticker, period="max", interval="1d", auto_adjust=True, progress=False)
+    try:
+        raw = yf.download(ticker, period="max", interval="1d", auto_adjust=True, progress=False)
+    except Exception:
+        return pd.DataFrame()
+
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+
+    # Ensure tz-naive DateTimeIndex
     if getattr(raw.index, "tz", None) is not None:
         raw.index = raw.index.tz_localize(None)
-    out = raw[["Close"]].dropna().copy()
-    # EMAs 
+    try:
+        raw.index = pd.to_datetime(raw.index)
+    except Exception:
+        pass
+
+    out = raw.filter(items=["Close"]).dropna().copy()
+    if out.empty:
+        return out
+
+    # EMAs used only for price panels
     out["ema20"]  = out["Close"].ewm(span=20,  adjust=False).mean()
     out["ema100"] = out["Close"].ewm(span=100, adjust=False).mean()
     return out
 
-px_full = _fetch_close_full(ticker)             # <-- true IPO→today
-px_zoom = px_full.loc[px_full.index >= px_full.index.max() - pd.DateOffset(years=ZOOM_YEARS_FIXED)].copy()
+
+px_full = _fetch_close_full(ticker)
+
+# Fallback to pipeline output if Yahoo returned nothing (keeps charts alive)
+if px_full is None or px_full.empty:
+    px_full = df[["Close", "ema20", "ema100"]].dropna().copy()
+
+# Safety: sort, coerce index → datetime
+px_full = px_full.sort_index()
+if not isinstance(px_full.index, pd.DatetimeIndex):
+    px_full.index = pd.to_datetime(px_full.index, errors="coerce")
+px_full = px_full[~px_full.index.isna()]
+
+# Build zoom slice (handle edge case: very short history)
+if px_full.empty:
+    st.error("No price data available to plot.")
+    st.stop()
+cutoff = px_full.index.max() - pd.DateOffset(years=ZOOM_YEARS_FIXED)
+px_zoom = px_full.loc[px_full.index >= cutoff].copy()
+if px_zoom.empty:
+    # If zoom is empty (e.g., too-short history), just use the last 750 rows as a fallback
+    px_zoom = px_full.tail(750).copy()
 
 def _plot_close_emas(dfp: pd.DataFrame, title: str, h=440) -> go.Figure:
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=dfp.index, y=dfp["Close"],  name="Close",
-                             mode="lines", line=dict(width=2.1, color="#111")))
-    fig.add_trace(go.Scatter(x=dfp.index, y=dfp["ema20"], name="EMA20",
-                             mode="lines", line=dict(width=1.5, color="#ff7f0e")))
-    fig.add_trace(go.Scatter(x=dfp.index, y=dfp["ema100"], name="EMA100",
-                             mode="lines", line=dict(width=1.5, color="#2ca02c")))
+    fig.add_trace(go.Scatter(
+        x=dfp.index, y=dfp["Close"], name="Close",
+        mode="lines", line=dict(width=2.1, color="#111"),
+        connectgaps=True
+    ))
+    fig.add_trace(go.Scatter(
+        x=dfp.index, y=dfp["ema20"], name="EMA20",
+        mode="lines", line=dict(width=1.5, color="#ff7f0e"),
+        connectgaps=True
+    ))
+    fig.add_trace(go.Scatter(
+        x=dfp.index, y=dfp["ema100"], name="EMA100",
+        mode="lines", line=dict(width=1.5, color="#2ca02c"),
+        connectgaps=True
+    ))
     fig.update_layout(
         title=dict(text=title, pad=dict(b=22)),
         template="plotly_white", height=h,
@@ -254,6 +302,7 @@ def _plot_close_emas(dfp: pd.DataFrame, title: str, h=440) -> go.Figure:
         yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
     )
     return fig
+
 
 # (1) IPO→today
 st.plotly_chart(_plot_close_emas(px_full, "TSLA — Close with EMA20 / EMA100 (IPO → today)"),
