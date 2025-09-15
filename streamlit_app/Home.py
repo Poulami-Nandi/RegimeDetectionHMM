@@ -249,7 +249,6 @@ def _fetch_close_full(ticker: str) -> pd.DataFrame:
     out["ema100"] = out["Close"].ewm(span=100, adjust=False).mean()
     return out
 
-
 px_full = _fetch_close_full(ticker)
 
 # Fallback to pipeline output if Yahoo returned nothing (keeps charts alive)
@@ -262,14 +261,22 @@ if not isinstance(px_full.index, pd.DatetimeIndex):
     px_full.index = pd.to_datetime(px_full.index, errors="coerce")
 px_full = px_full[~px_full.index.isna()]
 
+# In case of truncated cache
+try:
+    if not px_full.empty and (px_full.index.min() > pd.Timestamp("2012-01-01")):
+        # Cached data is suspiciously recent → clear cache and refetch once
+        st.cache_data.clear()
+        px_full = _fetch_close_full(ticker).sort_index()
+        if not isinstance(px_full.index, pd.DatetimeIndex):
+            px_full.index = pd.to_datetime(px_full.index, errors="coerce")
+        px_full = px_full[~px_full.index.isna()]
+except Exception:
+    pass
+
 # Build zoom slice (handle edge case: very short history)
-if px_full.empty:
-    st.error("No price data available to plot.")
-    st.stop()
 cutoff = px_full.index.max() - pd.DateOffset(years=ZOOM_YEARS_FIXED)
 px_zoom = px_full.loc[px_full.index >= cutoff].copy()
 if px_zoom.empty:
-    # If zoom is empty (e.g., too-short history), just use the last 750 rows as a fallback
     px_zoom = px_full.tail(750).copy()
 
 def _plot_close_emas(dfp: pd.DataFrame, title: str, h=440) -> go.Figure:
