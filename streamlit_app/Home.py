@@ -219,9 +219,23 @@ if df is None or df.empty or "Close" not in df.columns:
 
 df = _ensure_emas(df.sort_index())
 
-# Price panels
-px_full = df[["Close","ema20","ema100"]]
-px_zoom = _last_years(px_full, ZOOM_YEARS_FIXED)   # fixed 3y window
+
+# --- Full-history Close strictly from Yahoo ---
+import yfinance as yf
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_close_full(ticker: str) -> pd.DataFrame:
+    raw = yf.download(ticker, period="max", interval="1d", auto_adjust=True, progress=False)
+    if getattr(raw.index, "tz", None) is not None:
+        raw.index = raw.index.tz_localize(None)
+    out = raw[["Close"]].dropna().copy()
+    # EMAs 
+    out["ema20"]  = out["Close"].ewm(span=20,  adjust=False).mean()
+    out["ema100"] = out["Close"].ewm(span=100, adjust=False).mean()
+    return out
+
+px_full = _fetch_close_full(ticker)             # <-- true IPO→today
+px_zoom = px_full.loc[px_full.index >= px_full.index.max() - pd.DateOffset(years=ZOOM_YEARS_FIXED)].copy()
 
 def _plot_close_emas(dfp: pd.DataFrame, title: str, h=440) -> go.Figure:
     fig = go.Figure()
