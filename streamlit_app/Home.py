@@ -62,7 +62,7 @@ st.set_page_config(
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║ Sidebar controls                                                         ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
-st.title("TSLA Regime Detection — HMM + Human-Readable Rules")
+st.title("TSLA Regime Detection — HMM + Configurable parameters")
 
 ticker = "TSLA"
 
@@ -73,7 +73,7 @@ ENTRY_RET_LOOKBACK_FIXED = 10
 ENTRY_RET_THRESH_FIXED   = -0.01
 
 # Visible knobs (kept minimal)
-st.sidebar.header("Core knobs")
+st.sidebar.header("Core configuration")
 k_forward           = st.sidebar.slider("k_forward (label look-ahead days)", 1, 20, value=10, step=1)
 ema_span            = st.sidebar.slider("EMA smoothing of bear prob", 5, 60, value=20, step=1)
 bear_enter          = st.sidebar.slider("Bear enter threshold", 0.50, 0.99, value=0.72, step=0.01)
@@ -96,7 +96,7 @@ trend_gate          = st.sidebar.checkbox("Trend gate (entry/exit with EMAs)", v
 bull_mom_threshold  = st.sidebar.slider("Bull momentum (EMA20>EMA100 by)", 0.00, 0.05, value=0.01, step=0.001)
 bull_ddown_exit     = st.sidebar.slider("Bull drawdown exit (healed within)", 0.00, 0.20, value=0.06, step=0.005)
 bear_profit_exit    = st.sidebar.slider("Bear profit-exit (bounce from entry)", 0.00, 0.20, value=0.05, step=0.005)
-strict              = st.sidebar.checkbox("Strict direction cleanup (bear)", value=False)
+strict              = st.sidebar.checkbox("Strict direction cleanup (bear)", value=True)
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║ Helpers                                                                  ║
@@ -366,7 +366,7 @@ def _seg_rows(mask: pd.Series, label: str):
         ret = (end_close / start_close - 1.0) if (start_close and end_close and start_close != 0) else None
         rows.append({"type": label, "start": s, "end": e,
                      "days": (e - s).days + 1, "start_close": start_close,
-                     "end_close": end_close, "return": ret})
+                     "end_close": end_close})
     return rows
 
 bull_rows = _seg_rows(bull_conf, "bull_confirm")
