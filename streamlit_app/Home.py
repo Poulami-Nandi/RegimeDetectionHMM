@@ -35,7 +35,7 @@ st.title("TSLA Regime Detection — HMM + Human-Readable Rules (Crisp Zoom Chart
 st.sidebar.markdown("### Controls (fixed to TSLA)")
 ticker = "TSLA"
 
-# ── knobs (same as before) ──────────────────────────────────────────────────
+# ── knobs ───────────────────────────────────────────────────────────────────
 n_components        = st.sidebar.number_input("HMM states (n_components)", 2, 6, 4, 1)
 k_forward           = st.sidebar.slider("k_forward (days ahead for label)", 1, 20, 10, 1)
 ema_span            = st.sidebar.slider("EMA smoothing of bear prob (ema_span)", 5, 60, 20, 1)
@@ -129,9 +129,7 @@ def _infer_bear_masks(df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series
     if p_bear is None:
         p_bear = pd.Series(index=idx, dtype=float)
     p_bear_ema = p_bear.ewm(span=ema_span, adjust=False).mean()
-    # candidate: smoothed prob >= enter
     cand = (p_bear_ema >= bear_enter).reindex(idx).fillna(False)
-    # confirm: trend & drawdown
     tmp = _ensure_emas(df.copy())
     ema_ok = (tmp["ema20"] < tmp["ema100"] * (1 - mom_threshold)).reindex(idx).fillna(False)
     if "drawdown" in tmp:
@@ -145,12 +143,10 @@ def _infer_bear_masks(df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series
 def _infer_bull_masks(df: pd.DataFrame, p_bear_ema: pd.Series | None) -> tuple[pd.Series, pd.Series]:
     idx = df.index
     tmp = _ensure_emas(df.copy())
-    # If we have p_bear_ema, use hysteresis complement for candidate; else use simple trend candidate
     if p_bear_ema is not None and not p_bear_ema.empty:
         bull_cand = (p_bear_ema <= bear_exit).reindex(idx).fillna(False)
     else:
         bull_cand = (tmp["ema20"] > tmp["ema100"]).reindex(idx).fillna(False)
-    # Confirm bull: trend strong AND drawdown healed
     ema_up = (tmp["ema20"] > tmp["ema100"] * (1 + max(0.0001, bull_mom_threshold))).reindex(idx).fillna(False)
     if "drawdown" in tmp:
         dd = pd.to_numeric(tmp["drawdown"], errors="coerce")
@@ -206,7 +202,7 @@ df = _ensure_emas(df.sort_index())
 px_full = df[["Close","ema20","ema100"]].copy()
 px_zoom = _last_years(px_full, zoom_years)
 
-# ── price plots (unchanged) ────────────────────────────────────────────────
+# ── price plots ─────────────────────────────────────────────────────────────
 def _plot_close_emas(df_plot: pd.DataFrame, title: str, h=440) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Close"], name="Close",
@@ -228,8 +224,7 @@ st.plotly_chart(_plot_close_emas(px_full, "TSLA — Close with EMA20 / EMA100 (I
 st.plotly_chart(_plot_close_emas(px_zoom, f"TSLA — Close with EMA20 / EMA100 (last {zoom_years} years)"),
                 use_container_width=True, theme="streamlit")
 
-# ── regime view (now all 4 states) ─────────────────────────────────────────
-# Get pipeline masks if present; otherwise infer. Also infer bull masks.
+# ── regime view (all 4 states) ─────────────────────────────────────────────
 bear_cand_raw = pd.Series(df.get("bear_candidate", False), index=df.index).astype(bool)
 bear_conf_raw = pd.Series(df.get("bear_confirm",   False), index=df.index).astype(bool)
 
@@ -237,7 +232,6 @@ cand_inf, conf_inf, p_bear_ema = _infer_bear_masks(df)
 bear_cand_used = bear_cand_raw if bear_cand_raw.any() else cand_inf
 bear_conf_used = bear_conf_raw if bear_conf_raw.any() else conf_inf
 
-# Bulls (from pipeline if present, else inferred)
 bull_cand_raw = pd.Series(df.get("bull_candidate", False), index=df.index).astype(bool)
 bull_conf_raw = pd.Series(df.get("bull_confirm",   False), index=df.index).astype(bool)
 bull_cand_inf, bull_conf_inf = _infer_bull_masks(df, p_bear_ema)
@@ -254,7 +248,6 @@ bull_conf = bull_conf_used.reindex(px_zoom.index).fillna(False)
 bear_cand_only = bear_cand & (~bear_conf)
 bull_cand_only = bull_cand & (~bull_conf)
 
-# Plot with 4-color shading
 fig_reg = go.Figure()
 fig_reg.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["Close"],  name="Close",
                              mode="lines", line=dict(width=2.0, color="#111")))
@@ -292,7 +285,7 @@ fig_reg.update_layout(
 )
 st.plotly_chart(fig_reg, use_container_width=True, theme="streamlit")
 
-# ── tables: confirmed bear & bull with prices and returns ───────────────────
+# ── confirmed tables (SEPARATE bear & bull) ─────────────────────────────────
 st.markdown("### Confirmed segments in zoom window")
 
 def _segments_list(index, mask_bool):
@@ -324,22 +317,41 @@ def _rows_for(mask: pd.Series, label: str):
         })
     return rows
 
-rows = _rows_for(bear_conf, "bear_confirm") + _rows_for(bull_conf, "bull_confirm")
-seg_df = pd.DataFrame(rows, columns=["type","start","end","days","start_close","end_close","return_%"]).sort_values("start")
+# Build separate DataFrames
+bear_rows = _rows_for(bear_conf, "bear_confirm")
+bull_rows = _rows_for(bull_conf, "bull_confirm")
+bear_df = pd.DataFrame(bear_rows, columns=["type","start","end","days","start_close","end_close","return_%"]).sort_values("start")
+bull_df = pd.DataFrame(bull_rows, columns=["type","start","end","days","start_close","end_close","return_%"]).sort_values("start")
 
-if seg_df.empty:
-    st.info("No confirmed segments in the zoom window.")
+# ---- BEAR table ----
+st.subheader("Confirmed BEAR segments")
+if bear_df.empty:
+    st.info("No confirmed bear segments in the zoom window.")
 else:
-    st.dataframe(seg_df, use_container_width=True, hide_index=True)
+    st.dataframe(bear_df, use_container_width=True, hide_index=True)
     st.download_button(
-        "Download segments (CSV)",
-        data=seg_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"tsla_confirmed_segments_last{zoom_years}y.csv",
+        "Download BEAR segments (CSV)",
+        data=bear_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"tsla_confirmed_bear_last{zoom_years}y.csv",
         mime="text/csv", use_container_width=True
     )
-    st.text_area("Quick copy (CSV)", seg_df.to_csv(index=False), height=160)
+    st.text_area("Copy BEAR segments (CSV)", bear_df.to_csv(index=False), height=140)
 
-# ── debug panel (now includes bulls) ────────────────────────────────────────
+# ---- BULL table ----
+st.subheader("Confirmed BULL segments")
+if bull_df.empty:
+    st.info("No confirmed bull segments in the zoom window.")
+else:
+    st.dataframe(bull_df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Download BULL segments (CSV)",
+        data=bull_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"tsla_confirmed_bull_last{zoom_years}y.csv",
+        mime="text/csv", use_container_width=True
+    )
+    st.text_area("Copy BULL segments (CSV)", bull_df.to_csv(index=False), height=140)
+
+# ── debug panel (optional) ─────────────────────────────────────────────────
 show_debug = st.sidebar.checkbox("Debug mode (regimes)", value=False)
 if show_debug:
     st.markdown("### Regime debug")
