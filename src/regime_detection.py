@@ -306,6 +306,77 @@ def _hysteresis_path_directional(
     return y, protect_bull
 
 
+def _strict_demote_unproductive_bear_runs(
+    regime: np.ndarray,
+    close: np.ndarray,
+    protect_bull: np.ndarray,
+    strict_bear_min_ret: float,
+    strict_bear_min_maxdd: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Strict post-pass to *demote* “unproductive” bear runs.
+
+    Need of this function
+    ---------------
+    The main hysteresis + gates step decides when to flip into/out of BEAR based
+    on probability and confirmations. In choppy/sideways markets you can still
+    get short BEAR runs that, in hindsight, did not actually deliver meaningful
+    *downside behavior*. This pass removes those runs so the final regime path
+    looks more human-reasonable and avoids false alarms.
+
+    Parameters
+    ----------
+    regime : np.ndarray[int]
+        Array of BULL/BEAR labels (0/1) from the hysteresis step.
+    close : np.ndarray[float]
+        Close prices aligned 1:1 with `regime`.
+    protect_bull : np.ndarray[bool]
+        Mask of indices that we must preserve as BULL (e.g., profit-exit flips).
+        This function augments it where demotions happen.
+    strict_bear_min_ret : float
+        Minimum *negative* total return to consider a bear run “productive”.
+        Example: -0.5%  → any bear run with ret > -0.5% will be demoted.
+    strict_bear_min_maxdd : float
+        Minimum *negative* max drawdown from entry to consider “productive”.
+        Example: -3%     → any bear run with dd > -3% will be demoted.
+
+    Returns
+    -------
+    regime_out : np.ndarray[int]
+        Regime after demotions (same shape as input).
+    protect_bull_out : np.ndarray[bool]
+        Updated protection mask (includes newly demoted spans).
+    """
+    y = regime.copy()
+    n = len(y)
+    i = 0
+    while i < n:
+        # Seek next BEAR island
+        if y[i] != BEAR:
+            i += 1
+            continue
+
+        j = i
+        while j + 1 < n and y[j + 1] == BEAR:
+            j += 1
+
+        # Compute run metrics from entry i to exit j
+        p0 = close[i]
+        p1 = close[j]
+        ret = (p1 / p0) - 1.0
+        run_min = np.min(close[i:j + 1]) if j >= i else p1
+        dd_from_entry = (run_min / p0) - 1.0
+
+        # Demote if not bearish enough by either criterion
+        if (ret > strict_bear_min_ret) or (dd_from_entry > strict_bear_min_maxdd):
+            y[i:j + 1] = BULL
+            protect_bull[i:j + 1] = True  # lock these as bull for later cleaners
+
+        i = j + 1
+
+    return y, protect_bull
+
+
 # ---------- high-level API (used by the app) ----------
 
 def detect_regimes(
@@ -478,27 +549,16 @@ def detect_regimes(
         bear_profit_exit=bear_profit_exit,
     )
 
-    # 9) strict pass (optional): if a bear run didn’t actually lose or draw down,
+    # 9) strict pass: if a bear run didn’t actually lose or draw down,
     #    demote it to bull. This reduces false alarms in noisy sideways markets.
     if strict_direction:
-        y = regime.copy()
-        n = len(y); i = 0
-        while i < n:
-            if y[i] != BEAR:
-                i += 1; continue
-            j = i
-            while j + 1 < n and y[j+1] == BEAR: 
-                j += 1
-            p0 = close[i]; p1 = close[j]
-            ret = (p1 / p0) - 1.0
-            run_min = np.min(close[i:j+1]) if j >= i else p1
-            dd_from_entry = (run_min / p0) - 1.0
-            if (ret > strict_bear_min_ret) or (dd_from_entry > strict_bear_min_maxdd):
-                # Not bearish enough → flip to bull and protect from cleaners
-                y[i:j+1] = BULL
-                protect_bull[i:j+1] = True
-            i = j + 1
-        regime = y
+        regime, protect_bull = _strict_demote_unproductive_bear_runs(
+            regime=regime,
+            close=close,
+            protect_bull=protect_bull,
+            strict_bear_min_ret=strict_bear_min_ret,
+            strict_bear_min_maxdd=strict_bear_min_maxdd,
+        )
 
     # 10) after flips are decided, remove tiny islands; keep protected bulls intact
     regime = _clean_islands_protected(regime, min_bull=min_bull_run, min_bear=min_bear_run, protect_bull=protect_bull)
