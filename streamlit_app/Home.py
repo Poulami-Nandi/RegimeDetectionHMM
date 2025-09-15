@@ -7,24 +7,23 @@ from __future__ import annotations
 # ║  Streamlit page with three TSLA charts:                                 ║
 # ║    1) IPO→today Close + EMA20/EMA100                                    ║
 # ║    2) Last N years Close + EMA20/EMA100                                 ║
-# ║    3) Last N years "Regime" view with bear candidate/confirm shading    ║
+# ║    3) Last N years "Regime" view with bull/bear candidate & confirmed   ║
+# ║       shading (green=bulllight/dark, red=bear light/dark).              ║
 # ║                                                                          ║
-# ║  Robust to minor API changes in `detect_regimes` via a flexible adapter. ║
-# ║  If the pipeline doesn’t provide masks, we infer them sensibly.          ║
+# ║  Robust to minor API changes in `detect_regimes` via a flexible adapter.║
+# ║  If the pipeline doesn’t provide masks, we infer them sensibly.         ║
 # ║                                                                          ║
-# ║  This version **hides several knobs** to keep the demo simple:           ║
-# ║    - n_components        -> locked to 4                                  ║
-# ║    - zoom_years          -> locked to 3 years                            ║
-# ║    - entry_ret_lookback  -> locked to 10 days                            ║
-# ║    - entry_ret_thresh    -> locked to -0.01                              ║
-# ║    - confirm_days_bull   -> locked to 3                                  ║
-# ║    - min_bull_run        -> locked to 5                                  ║
-# ║  All locks are documented below where defined and where used.            ║
+# ║  Locked (hidden) knobs per your request:                                ║
+# ║    - n_components        = 4                                            ║
+# ║    - zoom_years          = 3                                            ║
+# ║    - entry_ret_lookback  = 10                                           ║
+# ║    - entry_ret_thresh    = -0.01                                        ║
+# ║    - confirm_days_bull   = 3                                            ║
+# ║    - min_bull_run        = 5                                            ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 # ===== stdlib =====
 import inspect
-from functools import wraps
 from pathlib import Path
 import sys
 
@@ -65,16 +64,13 @@ st.set_page_config(
 # ════════════════════════════════════════════════════════════════════════════
 #                   LOCKED (HIDDEN) DEMO DEFAULTS
 # ════════════════════════════════════════════════════════════════════════════
-# We **intentionally hide** these parameters from the UI to reduce questions
-# during a live demo. They’re still passed to the pipeline, but we keep them
-# fixed and document the choices here:
-
-N_COMPONENTS_LOCK       = 4      # HMM states (locked) — simpler demo; good separation for TSLA
-ZOOM_YEARS_LOCK         = 3      # Last 3 years in plots (locked) — consistent visual
-ENTRY_RETLBK_LOCK       = 10     # Directional gate lookback (locked) — avoid micro-tuning on stage
-ENTRY_RETTHR_LOCK       = -0.01  # Require ≤ -1% trail return to start bear when gate is used
-CONFIRM_DAYS_BULL_LOCK  = 3      # Bull confirmation persistence (locked) — demo focuses on bears
-MIN_BULL_RUN_LOCK       = 5      # Remove micro bull blips (locked)
+# We **intentionally hide** these parameters to keep the demo focused.
+N_COMPONENTS_LOCK       = 4      # HMM states (locked)
+ZOOM_YEARS_LOCK         = 3      # years (locked)
+ENTRY_RETLBK_LOCK       = 10     # days (locked)
+ENTRY_RETTHR_LOCK       = -0.01  # -1% (locked)
+CONFIRM_DAYS_BULL_LOCK  = 3      # (locked)
+MIN_BULL_RUN_LOCK       = 5      # days (locked)
 
 # ===========================================================================#
 #                                SIDEBAR                                     #
@@ -83,31 +79,29 @@ st.title("TSLA Regime Detection — HMM + Human-Readable Rules (Crisp Zoom Chart
 st.sidebar.markdown("### Controls (fixed to TSLA)")
 ticker = "TSLA"
 
-# We **show these two “locked” facts** so the interviewer sees the intent,
-# but we don’t provide interactive controls that would invite questions.
+# Show locked info without offering controls
 st.sidebar.info(
     f"**HMM states (locked):** {N_COMPONENTS_LOCK}\n\n"
-    f"**Zoom window (locked):** {ZOOM_YEARS_LOCK} years"
+    f"**Zoom window (locked):** {ZOOM_YEARS_LOCK} years\n\n"
+    f"**Other locks:** entry_ret_lookback=10, entry_ret_thresh=-0.01, "
+    f"confirm_days_bull=3, min_bull_run=5"
 )
 
-# Visible knobs (keep the set compact & intuitive)
+# Visible knobs (keep compact & intuitive)
 st.sidebar.markdown("### Regime knobs (demo-friendly)")
-# NOTE: n_components is **hidden** — we set it below from N_COMPONENTS_LOCK.
 k_forward           = st.sidebar.slider("k_forward (days ahead for labeling)", 1, 20, value=10, step=1)
 ema_span            = st.sidebar.slider("EMA smoothing of bear prob (ema_span)", 5, 60, value=20, step=1)
 bear_enter          = st.sidebar.slider("Bear enter threshold", 0.50, 0.99, value=0.80, step=0.01)
 bear_exit           = st.sidebar.slider("Bear exit threshold", 0.00, 0.95, value=0.55, step=0.01)
 
 min_bear_run        = st.sidebar.slider("Min bear run (days)", 1, 60, value=15, step=1)
-# NOTE: min_bull_run is **hidden** — we lock it via MIN_BULL_RUN_LOCK
+# NOTE: min_bull_run is **hidden** — locked at MIN_BULL_RUN_LOCK
 
 mom_threshold       = st.sidebar.slider("Trend weakness (mom_threshold)", 0.00, 0.10, value=0.03, step=0.001)
 ddown_threshold     = st.sidebar.slider("Drawdown confirm (ddown_threshold)", 0.00, 0.30, value=0.15, step=0.005)
 confirm_days        = st.sidebar.slider("Confirm days (bear)", 0, 20, value=7, step=1)
 
-# Bull-side confirm knobs exist in the pipeline, but for demo simplicity:
-#   - confirm_days_bull is **hidden** (locked)
-#   - min_bull_run     is **hidden** (locked)
+# Bull-side tuning (confirm_days_bull is locked)
 bull_mom_threshold  = st.sidebar.slider("Bull trend (bull_mom_threshold)", 0.00, 0.05, value=0.01, step=0.001)
 bull_ddown_exit     = st.sidebar.slider("Bull dd exit (bull_ddown_exit)", 0.00, 0.20, value=0.06, step=0.005)
 
@@ -115,20 +109,13 @@ direction_gate      = st.sidebar.checkbox("Directional gate", value=True)
 trend_gate          = st.sidebar.checkbox("Trend gate", value=True)
 strict              = st.sidebar.checkbox("Strict confirmation", value=False)
 
-# NOTE: entry_ret_lookback and entry_ret_thresh are **hidden** — we lock them.
-# entry_ddown_thresh and bear_profit_exit remain visible (optional).
+# Entry drawdown & profit exit: leave visible (optional)
 entry_ddown_thresh  = st.sidebar.slider("Entry drawdown threshold", -0.10, 0.10, value=-0.03, step=0.001)
 bear_profit_exit    = st.sidebar.slider("Bear profit exit", 0.00, 0.20, value=0.05, step=0.005)
 
-# We also do **not** expose a zoom_years slider — it is locked to 3y.
+# Apply locks
 n_components = N_COMPONENTS_LOCK
 zoom_years   = ZOOM_YEARS_LOCK
-
-# These two are locked (hidden) but we show a subtle note in the sidebar footer:
-st.sidebar.caption(
-    "Locked for demo: entry_ret_lookback=10, entry_ret_thresh=-0.01, "
-    "confirm_days_bull=3, min_bull_run=5."
-)
 
 # ===========================================================================#
 #                              HELPERS                                       #
@@ -199,53 +186,82 @@ def _last_years(df: pd.DataFrame, years: int) -> pd.DataFrame:
     return df.loc[df.index >= start].copy()
 
 
-def _try_get_prob_series(df: pd.DataFrame) -> pd.Series | None:
-    """Find a 'bear probability' column by fuzzy name."""
-    candidates = [c for c in df.columns if "prob" in c.lower() and "bear" in c.lower()]
-    if candidates:
-        s = pd.to_numeric(df[candidates[0]], errors="coerce")
+def _try_get_prob_series(df: pd.DataFrame, kind: str = "bear") -> pd.Series | None:
+    """Find a probability series by fuzzy name: 'p_bear' or 'p_bull' if present."""
+    kind = kind.lower()
+    # prefer explicit names
+    cand = [c for c in df.columns if "prob" in c.lower() and kind in c.lower()]
+    if cand:
+        s = pd.to_numeric(df[cand[0]], errors="coerce")
         return s.astype(float)
+    # convenience aliases
+    if kind == "bear" and "p_bear" in df:
+        return pd.to_numeric(df["p_bear"], errors="coerce").astype(float)
+    if kind == "bull" and "p_bull" in df:
+        return pd.to_numeric(df["p_bull"], errors="coerce").astype(float)
     return None
 
 
-def _infer_bear_masks(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+def _min_run_filter(mask: pd.Series, min_len: int) -> pd.Series:
+    """Basic run-length cleaner: drop True runs shorter than `min_len`."""
+    mask = pd.Series(mask, index=mask.index, dtype=bool)
+    run_id = (mask != mask.shift()).cumsum()
+    kept = mask.copy()
+    for _, seg in mask.groupby(run_id):
+        if seg.iloc[0] and len(seg) < min_len:
+            kept.loc[seg.index] = False
+    return kept
+
+
+def _infer_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
     """
-    Build (bear_candidate, bear_confirm) when the pipeline doesn’t supply them.
-    Candidate: EMA-smoothed bear probability >= enter.
-    Confirmed: candidate & (ema20 < ema100 by mom_threshold) & (drawdown <= -ddown_threshold).
-    Includes a short run-length filter to avoid single-day flickers.
+    Build bull/bear candidate & confirm masks if missing:
+      - Bear candidate: EMA(p_bear) >= bear_enter
+      - Bear confirm:  bear_cand & (ema20 < ema100*(1-mom_thr)) & (ddown <= -ddown_thr)
+      - Bull candidate: EMA(p_bull) if present else (ema20 > ema100*(1+bull_mom_thr)) | (ddown >= -bull_ddown_exit)
+      - Bull confirm:   bull_cand & (ema20 > ema100*(1+bull_mom_thr))  (persistence locked at CONFIRM_DAYS_BULL_LOCK)
     """
     idx = df.index
-    cand = pd.Series(False, index=idx)
 
-    if "bear_candidate" in df:
-        cand = pd.Series(df["bear_candidate"], index=idx).fillna(False).astype(bool)
+    # --- Bear side ---
+    p_bear = _try_get_prob_series(df, "bear")
+    if p_bear is not None:
+        bear_cand = (p_bear.ewm(span=ema_span, adjust=False).mean() >= bear_enter).reindex(idx).fillna(False)
     else:
-        p = _try_get_prob_series(df)
-        if p is not None:
-            cand = (p.ewm(span=ema_span, adjust=False).mean() >= bear_enter).reindex(idx).fillna(False)
+        bear_cand = pd.Series(False, index=idx)
 
     tmp = _ensure_emas(df.copy())
-    ema_ok = (tmp["ema20"] < tmp["ema100"] * (1 - mom_threshold)).reindex(idx).fillna(False)
+    ema_bear_ok = (tmp["ema20"] < tmp["ema100"] * (1 - mom_threshold)).reindex(idx).fillna(False)
+    if "drawdown" in tmp:
+        dd = pd.to_numeric(tmp["drawdown"], errors="coerce")
+    else:
+        dd = (tmp["Close"] / tmp["Close"].cummax() - 1.0)
+    dd_bear_ok = (dd <= -ddown_threshold).fillna(False)
 
-    rolling_peak = tmp["Close"].cummax()
-    dd = (tmp["Close"] / rolling_peak - 1.0).reindex(idx)
-    dd_ok = (dd <= -ddown_threshold).fillna(False)
+    bear_conf = (bear_cand & ema_bear_ok & dd_bear_ok)
+    bear_cand = _min_run_filter(bear_cand, min_bear_run)
+    bear_conf = _min_run_filter(bear_conf, max(1, min_bear_run // 2))
 
-    conf = (cand & ema_ok & dd_ok)
+    # --- Bull side ---
+    p_bull = _try_get_prob_series(df, "bull")
+    ema_bull_ok = (tmp["ema20"] > tmp["ema100"] * (1 + bull_mom_threshold)).reindex(idx).fillna(False)
+    dd_bull_ok  = (dd >= -bull_ddown_exit).fillna(False)  # drawdown healed
 
-    def _min_run_filter(mask: pd.Series, min_len: int) -> pd.Series:
-        mask = mask.astype(bool).copy()
-        run_id = (mask != mask.shift()).cumsum()
-        kept = mask.copy()
-        for _, seg in mask.groupby(run_id):
-            if seg.iloc[0] and len(seg) < min_len:
-                kept.loc[seg.index] = False
-        return kept
+    if p_bull is not None:
+        bull_cand = (p_bull.ewm(span=ema_span, adjust=False).mean() >= (1.0 - bear_enter)).reindex(idx).fillna(False)
+    else:
+        # fallback: momentum or healed drawdown counts as a bull candidate
+        bull_cand = (ema_bull_ok | dd_bull_ok)
 
-    cand = _min_run_filter(cand, min_bear_run)
-    conf = _min_run_filter(conf, max(1, min_bear_run // 2))
-    return cand.astype(bool), conf.astype(bool)
+    bull_conf = _min_run_filter(bull_cand & ema_bull_ok, max(1, CONFIRM_DAYS_BULL_LOCK))
+    bull_cand = _min_run_filter(bull_cand, MIN_BULL_RUN_LOCK)
+
+    return {
+        "bear_candidate": bear_cand.astype(bool),
+        "bear_confirm":   bear_conf.astype(bool),
+        "bull_candidate": bull_cand.astype(bool),
+        "bull_confirm":   bull_conf.astype(bool),
+    }
 
 
 def _segments(index, mask_bool):
@@ -267,7 +283,7 @@ def _add_vbands(fig, idx, mask_bool, color, opacity):
     """
     Add vertical shaded bands for True runs in `mask_bool`.
     Use add_shape + yref='paper' so the bands span the full plot height
-    and never get clipped by y-axis range.
+    and never get clipped by y-axis range (robust across Plotly versions).
     """
     for s, e in _segments(idx, mask_bool):
         fig.add_shape(
@@ -282,11 +298,31 @@ def _add_vbands(fig, idx, mask_bool, color, opacity):
             layer="below",
         )
 
+
+def _segment_table(mask: pd.Series, close: pd.Series, label: str) -> pd.DataFrame:
+    """Build a copyable table of (type, start, end, days, start_close, end_close, return)."""
+    rows = []
+    for s, e in _segments(mask.index, mask.values):
+        start_close = float(close.loc[s])
+        end_close   = float(close.loc[e])
+        ret = (end_close / start_close - 1.0) if start_close else float("nan")
+        rows.append({
+            "type": label,
+            "start": s.strftime("%Y-%m-%d"),
+            "end":   e.strftime("%Y-%m-%d"),
+            "days":  (e - s).days + 1,
+            "start_close": round(start_close, 4),
+            "end_close":   round(end_close, 4),
+            "return":      round(ret, 6),
+        })
+    return pd.DataFrame(rows, columns=["type","start","end","days","start_close","end_close","return"])
+
+
 # ===========================================================================#
 #                     RUN PIPELINE (ONCE) AND PLOT                           #
 # ===========================================================================#
 with st.spinner("Running regime pipeline (TSLA)…"):
-    # NOTE: we pass the **locked** values here in place of the hidden knobs:
+    # Pass the **locked** values where appropriate.
     df, _ = _call_detect_regimes_flexible(
         detect_regimes,
         ticker="TSLA", start="2000-01-01", end="today",
@@ -318,11 +354,13 @@ if df is None or df.empty or "Close" not in df.columns:
 
 df = df.sort_index()
 df = _ensure_emas(df)
+
+# Build zoom slice from pipeline output (keeps everything aligned)
 px_full = df[["Close","ema20","ema100"]].copy()
 px_zoom = _last_years(px_full, zoom_years)
 
 # ────────────────────────────────────────────────────────────────────────────
-# Basic price+EMA plotting helper
+# Charts 1 & 2 (always visible)
 # ────────────────────────────────────────────────────────────────────────────
 def _plot_close_emas(df_plot: pd.DataFrame, title: str, h=440) -> go.Figure:
     fig = go.Figure()
@@ -343,30 +381,43 @@ def _plot_close_emas(df_plot: pd.DataFrame, title: str, h=440) -> go.Figure:
     )
     return fig
 
-# 1) Full history
 fig1 = _plot_close_emas(px_full, "TSLA — Close with EMA20 / EMA100 (IPO → today)")
 st.plotly_chart(fig1, use_container_width=True, theme="streamlit")
 
-# 2) Last-N-years zoom
 fig2 = _plot_close_emas(px_zoom, f"TSLA — Close with EMA20 / EMA100 (last {zoom_years} years)")
 st.plotly_chart(fig2, use_container_width=True, theme="streamlit")
 
 # ────────────────────────────────────────────────────────────────────────────
-# 3) Regime view (zoom window) with shading
+# 3) Regime view (zoom window) with bull & bear shading
 # ────────────────────────────────────────────────────────────────────────────
 
-# Choose masks: prefer pipeline masks only if they contain any True; otherwise infer.
+# Prefer pipeline masks if they are present & have any True; otherwise infer.
 bear_cand_raw = pd.Series(df.get("bear_candidate", False), index=df.index).astype(bool)
 bear_conf_raw = pd.Series(df.get("bear_confirm",   False), index=df.index).astype(bool)
+bull_cand_raw = pd.Series(df.get("bull_candidate", False), index=df.index).astype(bool)
+bull_conf_raw = pd.Series(df.get("bull_confirm",   False), index=df.index).astype(bool)
 
-cand_inf, conf_inf = _infer_bear_masks(df)
-bear_cand_used = bear_cand_raw if bear_cand_raw.any() else cand_inf
-bear_conf_used = bear_conf_raw if bear_conf_raw.any() else conf_inf
+# Build inferred masks
+masks_inf = _infer_masks(df)
 
+def _choose(pipeline: pd.Series, inferred: pd.Series) -> pd.Series:
+    return pipeline if pipeline.any() else inferred
+
+bear_cand_used = _choose(bear_cand_raw, masks_inf["bear_candidate"])
+bear_conf_used = _choose(bear_conf_raw, masks_inf["bear_confirm"])
+bull_cand_used = _choose(bull_cand_raw, masks_inf["bull_candidate"])
+bull_conf_used = _choose(bull_conf_raw, masks_inf["bull_confirm"])
+
+# Reindex to zoom & build candidate-only versions (so confirmed shading doesn’t double paint)
 bear_cand = bear_cand_used.reindex(px_zoom.index).fillna(False)
 bear_conf = bear_conf_used.reindex(px_zoom.index).fillna(False)
-cand_only = (bear_cand & (~bear_conf))
+bull_cand = bull_cand_used.reindex(px_zoom.index).fillna(False)
+bull_conf = bull_conf_used.reindex(px_zoom.index).fillna(False)
 
+bear_cand_only = (bear_cand & (~bear_conf))
+bull_cand_only = (bull_cand & (~bull_conf))
+
+# --- Regime plot ---
 fig_reg = go.Figure()
 fig_reg.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["Close"],  name="Close",
                              mode="lines", line=dict(width=2.0, color="#111")))
@@ -375,9 +426,11 @@ fig_reg.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["ema20"], name="EMA20",
 fig_reg.add_trace(go.Scatter(x=px_zoom.index, y=px_zoom["ema100"], name="EMA100",
                              mode="lines", line=dict(width=1.6, color="#2ca02c")))
 
-# Robust shading (spans full chart height)
-_add_vbands(fig_reg, px_zoom.index, cand_only, "crimson", 0.12)
-_add_vbands(fig_reg, px_zoom.index, bear_conf, "crimson", 0.30)
+# Shading: bull (green), bear (red); light=candidate-only, dark=confirmed
+_add_vbands(fig_reg, px_zoom.index, bull_cand_only, "#2ca02c", 0.12)  # light green
+_add_vbands(fig_reg, px_zoom.index, bull_conf,      "#2ca02c", 0.30)  # dark  green
+_add_vbands(fig_reg, px_zoom.index, bear_cand_only, "#d62728", 0.12)  # light red
+_add_vbands(fig_reg, px_zoom.index, bear_conf,      "#d62728", 0.30)  # dark  red
 
 params_str = (
     f"k_fwd={k_forward}, EMA={ema_span}, enter={bear_enter:.2f}, exit={bear_exit:.2f}, "
@@ -390,17 +443,39 @@ params_str = (
     f"profit_exit={bear_profit_exit:.2f}, strict={strict}"
 )
 fig_reg.update_layout(
-    title=dict(text=f"TSLA — Regimes (last {zoom_years} years; light=candidate, dark=confirmed)<br>"
+    title=dict(text=f"TSLA — Regimes (last {zoom_years} years; green=bull, red=bear; light=candidate, dark=confirmed)<br>"
                     f"<sup>{params_str}</sup>", pad=dict(b=26)),
     template="plotly_white",
-    height=520,
-    margin=dict(l=10, r=10, t=90, b=10),
+    height=540,
+    margin=dict(l=10, r=10, t=96, b=10),
     legend=dict(orientation="h", x=0, xanchor="left", y=1.02, yanchor="bottom"),
     xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
     yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
     hovermode="x unified",
 )
 st.plotly_chart(fig_reg, use_container_width=True, theme="streamlit")
+
+# ────────────────────────────────────────────────────────────────────────────
+# Confirmed segments tables (copyable)
+# ────────────────────────────────────────────────────────────────────────────
+st.markdown("### Confirmed segments in zoom window")
+
+bull_table = _segment_table(bull_conf, px_zoom["Close"], "bull_confirm")
+bear_table = _segment_table(bear_conf, px_zoom["Close"], "bear_confirm")
+
+colA, colB = st.columns(2)
+with colA:
+    st.subheader("Bull — confirmed")
+    if bull_table.empty:
+        st.info("No confirmed bull segments in the zoom window.")
+    else:
+        st.dataframe(bull_table, use_container_width=True)
+with colB:
+    st.subheader("Bear — confirmed")
+    if bear_table.empty:
+        st.info("No confirmed bear segments in the zoom window.")
+    else:
+        st.dataframe(bear_table, use_container_width=True)
 
 # ===========================================================================#
 #                               DEBUG PANEL                                  #
@@ -409,56 +484,38 @@ show_debug = st.sidebar.checkbox("Debug mode (regimes)", value=False)
 
 if show_debug:
     st.markdown("### Regime debug")
-
-    candidate_source = "pipeline" if bear_cand_raw.any() else "inferred"
-    confirm_source   = "pipeline" if bear_conf_raw.any() else "inferred"
+    candidate_source = {
+        "bear": "pipeline" if bear_cand_raw.any() else "inferred",
+        "bull": "pipeline" if bull_cand_raw.any() else "inferred",
+    }
+    confirm_source = {
+        "bear": "pipeline" if bear_conf_raw.any() else "inferred",
+        "bull": "pipeline" if bull_conf_raw.any() else "inferred",
+    }
 
     with st.expander("Input/columns snapshot", expanded=True):
         st.write({
             "df.shape": df.shape,
             "index.range": f"{df.index.min()} → {df.index.max()}",
             "has_bear_candidate_col": bool("bear_candidate" in df.columns),
-            "has_bear_confirm_col": bool("bear_confirm" in df.columns),
-            "pipeline_has_candidate_true": bool(bear_cand_raw.any()),
-            "pipeline_has_confirm_true":  bool(bear_conf_raw.any()),
+            "has_bear_confirm_col":  bool("bear_confirm" in df.columns),
+            "has_bull_candidate_col": bool("bull_candidate" in df.columns),
+            "has_bull_confirm_col":  bool("bull_confirm" in df.columns),
+            "pipeline_has_bear_cand_true": bool(bear_cand_raw.any()),
+            "pipeline_has_bear_conf_true": bool(bear_conf_raw.any()),
+            "pipeline_has_bull_cand_true": bool(bull_cand_raw.any()),
+            "pipeline_has_bull_conf_true": bool(bull_conf_raw.any()),
             "candidate_source": candidate_source,
             "confirm_source":   confirm_source,
         })
-        st.write("Columns:", list(df.columns)[:40])
+        st.write("Columns:", list(df.columns)[:60])
 
     with st.expander("Mask counts on the zoom window", expanded=True):
         st.write({
-            "candidate_used.sum": int(bear_cand.sum()),
-            "confirmed_used.sum": int(bear_conf.sum()),
-            "candidate_inferred.sum": int(cand_inf.reindex(px_zoom.index).fillna(False).sum()),
-            "confirmed_inferred.sum": int(conf_inf.reindex(px_zoom.index).fillna(False).sum()),
+            "bull_candidate.sum": int(bull_cand.sum()),
+            "bull_confirm.sum":   int(bull_conf.sum()),
+            "bear_candidate.sum": int(bear_cand.sum()),
+            "bear_confirm.sum":   int(bear_conf.sum()),
         })
-
-    p_bear = _try_get_prob_series(df) or pd.Series([], dtype=float)
-    if not p_bear.empty:
-        pz = p_bear.reindex(px_zoom.index)
-        pz_ema = pz.ewm(span=ema_span, adjust=False).mean()
-        fig_prob = go.Figure()
-        fig_prob.add_trace(go.Scatter(x=pz.index, y=pz.values, name="p_bear", mode="lines"))
-        fig_prob.add_trace(go.Scatter(x=pz_ema.index, y=pz_ema.values, name=f"EMA({ema_span})", mode="lines"))
-        fig_prob.add_hline(y=bear_enter, line=dict(width=1, dash="dash"),
-                           annotation_text="enter", annotation_position="top left")
-        fig_prob.add_hline(y=bear_exit, line=dict(width=1, dash="dot"),
-                           annotation_text="exit", annotation_position="bottom left")
-        fig_prob.update_layout(height=260, template="plotly_white", title="Bear probability (raw & EMA)")
-        st.plotly_chart(fig_prob, use_container_width=True)
-
-    def _seg_rows(mask: pd.Series, label: str):
-        rows = []
-        for s, e in _segments(mask.index, mask.values):
-            rows.append({"type": label, "start": s, "end": e, "days": (e - s).days + 1})
-        return rows
-
-    seg_rows = _seg_rows(cand_only, "bear_candidate_only") + _seg_rows(bear_conf, "bear_confirm")
-    seg_df = pd.DataFrame(seg_rows)
-    if seg_df.empty:
-        st.info("No segments found in the zoom window. If you expect bears, lower `bear_enter`, decrease `ema_span`, or reduce `min_bear_run`.")
-    else:
-        st.dataframe(seg_df, use_container_width=True)
 
 st.caption("Author: Dr. Poulami Nandi · Research demo only. Not investment advice.")
