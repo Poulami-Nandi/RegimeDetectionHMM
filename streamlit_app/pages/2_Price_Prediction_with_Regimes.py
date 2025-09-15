@@ -87,17 +87,15 @@ bear_profit_exit    = st.sidebar.slider("bear_profit_exit", 0.00, 0.20, 0.05, 0.
 
 # Bias strengths used to tilt the baseline by ±k×σ, where σ is a simple
 # volatility proxy over the zoom window.
-st.sidebar.subheader("Bias layer")
-vol_span     = st.sidebar.slider("vol_span (for bias σ)", 5, 60, 20, 1)
-bull_k       = st.sidebar.slider("bull_k (×σ)", -1.0, 2.0, 0.60, 0.05)
-bear_k_conf  = st.sidebar.slider("bear_k_conf (×σ)", -2.0, 0.0, -0.60, 0.05)
-bear_k_cand  = st.sidebar.slider("bear_k_cand (×σ)", -2.0, 0.0, -0.30, 0.05)
+vol_span     = 60
+bull_k       = 0.60
+bear_k_conf  = -0.60
+bear_k_cand  = -0.30
 
 # ARIMA(p,d,q) baseline (one-step-ahead on historical Close values).
-with st.sidebar.expander("ARIMA baseline (advanced)"):
-    p = st.number_input("ARIMA p", 0, 5, value=1, step=1)
-    d = st.number_input("ARIMA d", 0, 2, value=1, step=1)
-    q = st.number_input("ARIMA q", 0, 5, value=1, step=1)
+p = 1
+d = 1
+q = 1
 
 # ========================= Helpers =========================
 def _clean_series(s: pd.Series) -> pd.Series:
@@ -317,21 +315,6 @@ fig.update_layout(
 )
 st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
-# A concise explainer for non-technical readers.
-with st.expander("What’s happening here?", expanded=False):
-    st.markdown(
-        """
-**Baseline:** ARIMA one-step-ahead projection on last-N-years daily **Close** (built from OHLCV).  
-**Bias:** We tilt that baseline using regime signals and recent volatility (σ):
-
-- **Bull / sideways** → bias ≈ `+ bull_k × σ` (gentle uplift)  
-- **Bear (candidate)** → bias ≈ `bear_k_cand × σ` (small downward tilt)  
-- **Bear (confirmed)** → bias ≈ `bear_k_conf × σ` (stronger downward tilt)
-
-This page is read-only: it **does not change** the underlying detection code or the Home page.
-        """
-    )
-
 # ===================== Parameter explainer (bottom) =====================
 # High-level recap of the knobs; the Home page has a longer explainer.
 st.markdown("---")
@@ -344,6 +327,5 @@ st.markdown(
 - **`bear_enter` / `bear_exit`** — hysteresis for bear candidate/exit.  
 - **Confirmers** — `mom_threshold`, `ddown_threshold`, `confirm_days`.  
 - **Bull pockets** — `bull_mom_threshold`, `confirm_days_bull`, `bull_ddown_exit`.  
-- **Bias layer** — `vol_span` (vol estimate), `bull_k`, `bear_k_cand`, `bear_k_conf` (bias strength).
 """
 )
