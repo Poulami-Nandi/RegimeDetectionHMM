@@ -285,7 +285,7 @@ if not isinstance(px_full.index, pd.DatetimeIndex):
     px_full.index = pd.to_datetime(px_full.index, errors="coerce")
 px_full = px_full.loc[~px_full.index.isna()]
 
-# ▶️ Auto-heal truncated cache: if first date is suspiciously recent, clear cache and refetch
+# Auto-heal truncated cache: if first date is suspiciously recent, clear cache and refetch
 try:
     if not px_full.empty and (px_full.index.min() > pd.Timestamp("2012-01-01")):
         st.cache_data.clear()
